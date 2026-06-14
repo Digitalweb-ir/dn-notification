@@ -1,0 +1,50 @@
+services:
+  dn-notification:
+    container_name: dn-notification
+    # Pre-built image. Override DOCKER_IMAGE in .env to pin a specific tag
+    # or to use your own registry. Build context is no longer needed here
+    # because the image is built and published separately.
+    image: ${DOCKER_IMAGE:-docker.io/erfan/dn-notification:latest}
+    restart: always
+    # Run as a non-root user inside the container. UID/GID 1000 matches the
+    # service account created in the Dockerfile. On the host, the bind-mounted
+    # directory below should be owned by the same UID.
+    user: "1000:1000"
+    env_file:
+      - .env
+    environment:
+      # Inside the container, persistent data lives under
+      # /var/lib/dn-notification, which is bind-mounted from the same path
+      # on the host (see the volume below). Voices, the Telegram session
+      # file, and application logs all sit under this single tree.
+      - DATA_DIR=/var/lib/dn-notification
+      - VOICES_DIR=/var/lib/dn-notification/voices
+      - SESSION_DIR=/var/lib/dn-notification/session
+      - LOGS_DIR=/var/lib/dn-notification/logs
+      - PYTHONUNBUFFERED=1
+    ports:
+      # Configurable: change the host port in .env (HOST_PORT) or override here.
+      - "${HOST_PORT:-8000}:8000"
+    volumes:
+      # One bind-mount covers EVERYTHING that must survive container
+      # recreation, image rebuilds, and upgrades:
+      #   /var/lib/dn-notification/session/   -> /var/lib/dn-notification/session/
+      #   /var/lib/dn-notification/logs/      -> /var/lib/dn-notification/logs/
+      #   /var/lib/dn-notification/voices/    -> /var/lib/dn-notification/voices/
+      - /var/lib/dn-notification:/var/lib/dn-notification
+    # The image already declares a HEALTHCHECK; this just makes `docker ps`
+    # surface the status nicely.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    # json-file log driver with rotation so `docker compose logs` works
+    # and the host log volume doesn't grow unbounded.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    init: false

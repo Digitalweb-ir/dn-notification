@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(command -v shellcheck)",
+      "Bash(bash -n /Users/erfan/Projects/dn-deactive-notification/deploy/dnotification)",
+      "Bash(NO_COLOR=1 bash /Users/erfan/Projects/dn-deactive-notification/deploy/dnotification help)",
+      "Bash(NO_COLOR=1 bash /Users/erfan/Projects/dn-deactive-notification/deploy/dnotification status)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(PATH=/usr/bin:/bin NO_COLOR=1 bash /Users/erfan/Projects/dn-deactive-notification/deploy/dnotification status)",
+      "Bash(NO_COLOR=1 bash /Users/erfan/Projects/dn-deactive-notification/deploy/dnotification)",
+      "Bash(NO_COLOR=1 bash deploy/dnotification help)",
+      "Bash(NO_COLOR=1 bash deploy/dnotification version)",
+      "Bash(chmod +x /Users/erfan/Projects/dn-deactive-notification/dnnotification.sh)",
+      "Bash(bash -n /Users/erfan/Projects/dn-deactive-notification/dnnotification.sh)",
+      "Bash(./dnnotification.sh help *)",
+      "Bash(./dnnotification.sh version *)",
+      "Bash(./dnnotification.sh status *)",
+      "Bash(./dnnotification.sh)",
+      "Bash(./dnnotification.sh bogus-cmd *)",
+      "Bash(./dnnotification.sh install *)",
+      "Bash(bash *)"
+    ]
+  }
+}
