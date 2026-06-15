@@ -120,11 +120,11 @@ inside the container and on the host stay aligned without any extra wiring.
 
 ### Versioning
 
-The repository root contains a single `VERSION` file holding the semver
-release. It is the canonical source of truth: `app/__init__.py`'s
-`__version__` is kept in lockstep by `version_bump.sh`, and the same file is
-baked into the Docker image (copied to `/app/VERSION`) so the running
-container always reports its real release.
+The release is pinned by a **git tag** (`vX.Y.Z`) — the tag is the canonical
+release marker. `VERSION` and `app/__init__.py` are *derived* from the tag
+plus the commits since it, kept in lockstep by `version_bump.sh`. The
+running container reports its real release because the same `VERSION` file
+is baked into the Docker image (copied to `/app/VERSION`).
 
 `version_bump.sh` reads commit messages since the last version tag and bumps
 accordingly:
@@ -134,9 +134,35 @@ accordingly:
 | `break: …`    | major | `1.2.3 -> 2.0.0`  |
 | `feat: …`     | minor | `1.2.3 -> 1.3.0`  |
 | `fix: …`      | patch | `1.2.3 -> 1.2.4`  |
-| (none)        | —     | version unchanged |
+| (other)       | —     | version unchanged |
 
-It is invoked by `.github/workflows/bump-version.yml` on every push to `main`.
+**The bump is applied locally, in the same commit as the change that
+caused it.** A `commit-msg` hook at `.githooks/commit-msg` updates VERSION
+and `__init__.py` automatically when the commit subject starts with one of
+the recognised prefixes. The bump and the change land in one commit, so
+local and remote never diverge.
+
+To enable the hook in a fresh clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+To skip the auto-bump for a one-off commit (e.g. `chore:`, `docs:`), set
+`SKIP_VERSION_BUMP=1` in the environment, or use a prefix that isn't in
+the table above.
+
+CI (`.github/workflows/bump-version.yml`) does two things:
+
+1. On every push to `main`, runs `./version_bump.sh --check`. If VERSION
+   doesn't match the implied bump from the commits, the build fails. This
+   catches the case where someone bypassed the hook (e.g. by amending a
+   commit message).
+2. On `v*.*.*` tag pushes, builds and publishes the Docker image with the
+   tag as the image tag. Tags are created locally with
+   `git tag vX.Y.Z && git push --tags` — they never appear from a CI
+   auto-commit.
+
 
 ---
 
