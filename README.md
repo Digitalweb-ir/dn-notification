@@ -142,11 +142,17 @@ and `__init__.py` automatically when the commit subject starts with one of
 the recognised prefixes. The bump and the change land in one commit, so
 local and remote never diverge.
 
-To enable the hook in a fresh clone:
+To enable the hooks in a fresh clone:
 
 ```bash
-git config core.hooksPath .githooks
+make install-hooks
 ```
+
+That installs the `commit-msg` and `pre-push` hooks from `.githooks/`
+into your local `.git/hooks/` and verifies VERSION is in sync. Verify
+with `make check-hooks`. The previous `git config core.hooksPath
+.githooks` form still works if you prefer it, but the Makefile is the
+documented path.
 
 To skip the auto-bump for a one-off commit (e.g. `chore:`, `docs:`), set
 `SKIP_VERSION_BUMP=1` in the environment, or use a prefix that isn't in
