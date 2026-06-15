@@ -18,7 +18,8 @@
       "Bash(./dnnotification.sh)",
       "Bash(./dnnotification.sh bogus-cmd *)",
       "Bash(./dnnotification.sh install *)",
-      "Bash(bash *)"
+      "Bash(bash *)",
+      "Bash(chmod +x /Users/erfan/Projects/dn-deactive-notification/version_bump.sh)"
     ]
   }
 }

@@ -18,12 +18,14 @@ automatically. The session is persistent — no re-login on every request.
 
 ## Production install (one line)
 
-Deploy on any Linux host with Docker. The one-line installer downloads the
-`dnnotification` CLI from GitHub and runs it with `sudo` (it will ask for your
-Telegram credentials, then pull the image and start the service):
+Deploy on any Linux host with Docker. The installer downloads the
+`dnnotification` CLI from the canonical repo, runs it with `sudo`, and then
+asks for your Telegram credentials. The image
+**`digitalneetwork/dn-notification:latest`** is pulled and started automatically:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/erfan/dn-notification/main/dnnotification.sh | sudo bash -s -- install
+curl -fsSL https://raw.githubusercontent.com/Digitalweb-ir/dn-notification/main/dnnotification.sh \
+    | sudo bash -s -- install
 ```
 
 After it finishes, `dnnotification` is on `PATH` and the stack is running.
@@ -38,11 +40,12 @@ The installer:
 1. Verifies it is running as root.
 2. Installs Docker via the official `get.docker.com` script (if missing).
 3. Confirms the reinstall if `/opt/dn-notification` already exists.
-4. Downloads `docker-compose.yaml` and `.env.example` from the GitHub repo.
+4. Downloads `docker-compose.yaml` and `.env.example` from
+   `Digitalweb-ir/dn-notification` (branch `main`).
 5. Prompts for `TG_API_ID`, `TG_API_HASH`, `TG_PHONE`, and `API_KEY` and writes
    `/opt/dn-notification/.env` (mode `600`).
 6. Copies itself to `/usr/local/bin/dnnotification` (extension stripped, +x).
-7. Pulls the pre-built `docker.io/erfan/dn-notification:latest` image and
+7. Pulls the pre-built `digitalneetwork/dn-notification:latest` image and
    starts the container.
 
 > For the full host layout, security checklist, and day-2 operations, see
@@ -50,23 +53,95 @@ The installer:
 
 ---
 
+## Upgrading an existing install
+
+```bash
+sudo dnnotification update
+```
+
+The `update` flow:
+
+1. Reads the currently installed version from inside the running container
+   (`docker exec dn-notification cat /app/VERSION`).
+2. Fetches the latest `VERSION` from `Digitalweb-ir/dn-notification@main`.
+3. If the versions match, prints `You already have the latest version: …` and
+   exits. Otherwise it prompts `Do you want to install it? (yes/no)`.
+4. Downloads the latest `docker-compose.yaml` and `.env.example` into
+   `/opt/dn-notification`.
+5. **Merges** the existing `.env` with the new `.env.example`: every existing
+   `KEY=VALUE` is preserved, and any newly introduced key in the template is
+   prompted for interactively and appended. No user setting is ever overwritten.
+6. Stops the stack (`docker compose down`).
+7. Removes the existing `digitalneetwork/dn-notification:latest` image so the
+   next pull is forced to fetch a fresh copy.
+8. `docker compose pull && docker compose up -d`.
+
+---
+
 ## Architecture
 
 ```
 app/
-├── main.py              # FastAPI app, lifespan, routes, auth
-├── config.py            # Pydantic settings (loads .env)
-├── logger.py            # Structured logging setup
-├── models.py            # Pydantic request/response schemas
-├── telegram_client.py   # Telethon wrapper (FloodWait-safe)
-├── search_service.py    # Private-dialog cache + scoring search
-├── voice_service.py     # Voice file mapping + send_file
-└── voices/              # Place .ogg files here
+├── __init__.py           # __version__ (kept in sync with ../VERSION)
+├── main.py               # FastAPI app, lifespan, routes, auth
+├── config.py             # Pydantic settings (loads .env, derives sub-paths from DATA_DIR)
+├── logger.py             # Structured logging setup
+├── models.py             # Pydantic request/response schemas
+├── telegram_client.py    # Telethon wrapper (FloodWait-safe)
+├── search_service.py     # Private-dialog cache + scoring search
+└── voice_service.py      # Voice file mapping + send_file
+
+dnnotification.sh         # Deployment CLI (installed to /usr/local/bin/dnnotification)
+version_bump.sh           # Bumps VERSION based on commit-message keywords
+VERSION                   # Single source of truth for the release version
+docker-compose.yaml       # Single-service compose file (uses pre-built image)
+Dockerfile                # Production image (Python 3.11 slim, non-root, tini, healthcheck)
+.env.example              # Documented env template (copy to .env)
+.github/workflows/        # CI: version_bump on push to main
 ```
+
+### Simplified configuration
+
+`/opt/dn-notification/.env` keeps only the values you actually configure. The
+**only** path the user sets is `DATA_DIR`; voices, session, and logs
+sub-directories are derived from it programmatically by `app/config.py`:
+
+```python
+@property
+def voices_dir(self)  -> str: return f"{self.data_dir}/voices"
+@property
+def session_dir(self) -> str: return f"{self.data_dir}/session"
+@property
+def logs_dir(self)    -> str: return f"{self.data_dir}/logs"
+```
+
+The host bind-mount in `docker-compose.yaml` is the same single path
+(`/var/lib/dn-notification` -> `/var/lib/dn-notification`), so the values
+inside the container and on the host stay aligned without any extra wiring.
+
+### Versioning
+
+The repository root contains a single `VERSION` file holding the semver
+release. It is the canonical source of truth: `app/__init__.py`'s
+`__version__` is kept in lockstep by `version_bump.sh`, and the same file is
+baked into the Docker image (copied to `/app/VERSION`) so the running
+container always reports its real release.
+
+`version_bump.sh` reads commit messages since the last version tag and bumps
+accordingly:
+
+| Commit prefix  | Bump   | Example result |
+|----------------|--------|----------------|
+| `break: …`     | major  | `1.2.3 -> 2.0.0` |
+| `feat: …`      | minor  | `1.2.3 -> 1.3.0` |
+| `fix: …`       | patch  | `1.2.3 -> 1.2.4` |
+| (none)         | —      | version unchanged |
+
+It is invoked by `.github/workflows/bump-version.yml` on every push to `main`.
 
 ---
 
-## Setup
+## Setup (local dev)
 
 ### 1. Get Telegram API credentials
 
@@ -90,8 +165,8 @@ cp .env.example .env
 
 ### 4. First-time login
 
-The first run is interactive — Telethon needs the SMS code Telegram sends to
-your phone (and your 2FA password, if enabled).
+The first run is interactive — Telethon needs the SMS code Telegram sends
+to your phone (and your 2FA password, if enabled).
 
 ```bash
 export TG_PHONE="+1234567890"
@@ -240,6 +315,8 @@ Templates map to files in `app/voices/`:
 
 ## Configuration
 
+The only path you set is `DATA_DIR`; everything else is derived from it.
+
 | Env var                   | Default                              | Description                                  |
 |---------------------------|--------------------------------------|----------------------------------------------|
 | `TG_API_ID`               | —                                    | From my.telegram.org                         |
@@ -253,11 +330,12 @@ Templates map to files in `app/voices/`:
 | `SEARCH_LIMIT_PER_CHAT`   | `200`                                | Max messages fetched per dialog at warmup   |
 | `SEARCH_TOP_MATCHES`      | `3`                                  | Max matches returned per chat               |
 | `SEARCH_CACHE_TTL`        | `300`                                | Seconds before dialog cache is refreshed     |
-| `DATA_DIR`                | `/var/lib/dn-notification`           | Persistent data root (in-container)          |
-| `VOICES_DIR`              | `/var/lib/dn-notification/voices`    | Directory holding template .ogg files        |
-| `SESSION_DIR`             | `/var/lib/dn-notification/session`   | Where the Telegram `.session` file is stored |
-| `LOGS_DIR`                | `/var/lib/dn-notification/logs`      | Application log directory                    |
-| `DOCKER_IMAGE`            | `docker.io/erfan/dn-notification:latest` | Image pulled by docker compose            |
+| `DATA_DIR`                | `/var/lib/dn-notification`           | Persistent data root (in-container) — voices/session/logs are derived from this |
+
+The deployment image and the GitHub repo are **not** configurable:
+
+* Image: `digitalneetwork/dn-notification:latest`
+* Repo:  `https://github.com/Digitalweb-ir/dn-notification` (branch `main`)
 
 ---
 

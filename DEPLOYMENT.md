@@ -5,44 +5,56 @@ service using Docker Compose, managed by a single CLI: `dnnotification`.
 
 ---
 
-## 1. Host layout
+## 1. Project layout
 
-The script owns two directories on the host. They are separate by design so
-that project code and **sensitive session data** can be backed up, restored,
-and permissioned independently. **All persistent application data — including
-voice templates — lives under `/var/lib/dn-notification`**; the container
-bind-mounts that single directory at `/data` (see `docker-compose.yaml`).
+The CLI owns two top-level directories on the host. They are separated by
+design so that project code and **sensitive session data** can be backed up,
+restored, and permissioned independently. **All persistent application data —
+including voice templates — lives under `/var/lib/dn-notification`**; the
+container bind-mounts that single directory at the same path
+(see `docker-compose.yaml`).
 
-| Path                                | Purpose                                          | Default perms |
-|-------------------------------------|--------------------------------------------------|---------------|
-| `/opt/dn-notification`              | Project code, `docker-compose.yaml`, `.env`      | `755`         |
-| `/var/lib/dn-notification`          | Persistent data — bind-mounted into the container as `/data` | `700` |
-| `/var/lib/dn-notification/session`  | Telegram `.session` file (account credential)    | `700`         |
-| `/var/lib/dn-notification/logs`     | Application logs                                 | `755`         |
-| `/var/lib/dn-notification/voices`   | Voice templates (`.ogg` files)                   | `755`         |
+| Path                                | Purpose                                            | Default perms |
+|-------------------------------------|----------------------------------------------------|---------------|
+| `/opt/dn-notification`              | Project code, `docker-compose.yaml`, `.env`        | `755`         |
+| `/var/lib/dn-notification`          | Persistent data — bind-mounted into the container  | `700`         |
+| `/var/lib/dn-notification/session`  | Telegram `.session` file (account credential)      | `700`         |
+| `/var/lib/dn-notification/logs`     | Application logs                                   | `755`         |
+| `/var/lib/dn-notification/voices`   | Voice templates (`.ogg` files)                     | `755`         |
 
 > The `.session` file grants **full access** to the Telegram account that
 > signed in. Treat it like a password. The `700` permission on the data
 > directory means only root (or a member of root's group) can read it.
 
-All paths can be overridden by setting environment variables before invoking
-`dnnotification`:
-
-```bash
-export PROJECT_DIR=/srv/dn-notification
-export DATA_DIR=/srv/dn-data
-export VOICES_DIR=/srv/dn-data/voices
-dnnotification install
-```
+> The other sub-paths (`session/`, `logs/`, `voices/`) are derived from
+> `DATA_DIR` by `app/config.py` — they are **not** environment variables.
 
 ---
 
-## 2. One-time host setup
+## 2. Canonical source-of-truth constants
 
-### 2.1 Install Docker
+These are hardcoded in the CLI and in `docker-compose.yaml`; do not parameterise
+them with `.env` overrides or environment variables.
 
-The CLI does **not** auto-install Docker. It detects what's missing and prints
-install instructions for your OS. Pick one:
+| What             | Value                                                                |
+|------------------|----------------------------------------------------------------------|
+| GitHub repo      | `https://github.com/Digitalweb-ir/dn-notification` (branch `main`)  |
+| Docker image     | `digitalneetwork/dn-notification:latest`                             |
+| Project dir      | `/opt/dn-notification`                                               |
+| Data dir         | `/var/lib/dn-notification`                                           |
+
+If you fork the project, edit the constants at the top of `dnnotification.sh`
+and the `image:` line in `docker-compose.yaml`.
+
+---
+
+## 3. One-time host setup
+
+### 3.1 Install Docker
+
+The CLI auto-installs Docker (via the official `get.docker.com` script) the
+first time you run `dnnotification install` if it isn't already present. If
+you'd rather install it yourself:
 
 ```bash
 # Debian / Ubuntu
@@ -61,50 +73,87 @@ sudo systemctl enable --now docker
 # Install Docker Desktop: https://www.docker.com/products/docker-desktop
 ```
 
-### 2.2 Install the CLI
+### 3.2 Install the CLI
 
-Copy `deploy/dnotification` to a directory on your `$PATH`:
+Either run the one-line installer (recommended):
 
 ```bash
-sudo install -m 0755 deploy/dnotification /usr/local/bin/dnotification
-dnotification version       # -> dnotification 1.0.0
+curl -fsSL https://raw.githubusercontent.com/Digitalweb-ir/dn-notification/main/dnnotification.sh \
+    | sudo bash -s -- install
+```
+
+…or copy `dnnotification.sh` to your `PATH` manually:
+
+```bash
+sudo install -m 0755 dnnotification.sh /usr/local/bin/dnnotification
+dnnotification version
 ```
 
 ---
 
-## 3. First-time install
+## 4. First-time install
+
+`dnnotification install`:
+
+1. Verifies it is running as root.
+2. Installs Docker via `get.docker.com` (if missing).
+3. Confirms reinstall if `/opt/dn-notification` already exists.
+4. Downloads `docker-compose.yaml` and `.env.example` from
+   `Digitalweb-ir/dn-notification@main`.
+5. Creates `/opt/dn-notification` and the data tree under
+   `/var/lib/dn-notification/{session,logs,voices}`.
+6. Sets `700` on the data directory, `chown 1000:1000` so the container's
+   non-root user can write to the bind-mount.
+7. Prompts for `TG_API_ID`, `TG_API_HASH`, `TG_PHONE`, `API_KEY` and writes
+   `.env` (mode `600`).
+8. Copies itself to `/usr/local/bin/dnnotification` (extension stripped, +x).
+9. Pulls `digitalneetwork/dn-notification:latest` and runs
+   `docker compose up -d`.
+
+For the local file paths that you must populate by hand before first use:
 
 ```bash
-# Pull the project to /opt/dn-notification (or copy files there manually).
-sudo git clone <repo-url> /opt/dn-notification
-
-# Edit .env with your Telegram credentials.
-sudo cp /opt/dn-notification/.env.example /opt/dn-notification/.env
-sudo chmod 600 /opt/dn-notification/.env
-sudo $EDITOR /opt/dn-notification/.env
-#   TG_API_ID, TG_API_HASH, TG_PHONE, API_KEY  -> required
-#   HOST_PORT                                  -> host port (default 8000)
-
 # Add at least one voice template.
-sudo cp my-welcome.ogg /opt/dn-notification/voices/welcome.ogg
-
-# Run the install.
-dnotification install
+sudo cp my-limited.ogg /var/lib/dn-notification/voices/limited.ogg
 ```
-
-`dnotification install`:
-
-1. Verifies Docker + compose plugin are reachable.
-2. Creates `/opt/dn-notification`, `/var/lib/dn-notification/{session,logs}`,
-   and `/opt/dn-notification/voices`.
-3. Sets `700` on the data directory, `chown 1000:1000` so the container's
-   non-root user can write to the bind-mounts.
-4. Tightens `.env` permissions to `600`.
-5. Runs `docker compose up -d --build` and shows status.
 
 ---
 
-## 4. First-time Telegram login
+## 5. Configuration
+
+`/opt/dn-notification/.env` is kept deliberately small. The **only** path you
+configure is `DATA_DIR`; voices, session, and logs are derived from it in
+`app/config.py`:
+
+```python
+@property
+def voices_dir(self)  -> str: return f"{self.data_dir}/voices"
+@property
+def session_dir(self) -> str: return f"{self.data_dir}/session"
+@property
+def logs_dir(self)    -> str: return f"{self.data_dir}/logs"
+```
+
+The host bind-mount in `docker-compose.yaml` is the same single path
+(`/var/lib/dn-notification` -> `/var/lib/dn-notification`), so values inside
+the container and on the host stay aligned without any extra wiring.
+
+Use `dnnotification edit-env` to tweak the file after install. The required
+keys are:
+
+| Key           | Purpose                                                |
+|---------------|--------------------------------------------------------|
+| `TG_API_ID`   | From https://my.telegram.org/apps                      |
+| `TG_API_HASH` | From https://my.telegram.org/apps                      |
+| `TG_PHONE`    | International format, e.g. `+1234567890`               |
+| `API_KEY`     | Long random string. Required `X-API-KEY` header value  |
+
+Everything else (`HOST_PORT`, `LOG_LEVEL`, search tunables, …) has sensible
+defaults in `.env.example` and can be left as-is.
+
+---
+
+## 6. First-time Telegram login
 
 The first run is **interactive** — Telethon needs the SMS code Telegram sends
 to your phone (and your 2FA password, if enabled). The CLI doesn't perform
@@ -131,21 +180,22 @@ persists across container restarts. Subsequent boots are non-interactive.
 
 ---
 
-## 5. Daily operations
+## 7. Daily operations
 
-Run `dnotification` with no arguments for an interactive menu, or call a
+Run `dnnotification` with no arguments for an interactive menu, or call a
 subcommand directly:
 
 ```text
-dnotification
-  1) Install        dnotification install
-  2) Up             dnotification up
-  3) Down           dnotification down
-  4) Restart        dnotification restart
-  5) Logs           dnotification logs
-  6) Edit compose   dnotification edit
-  7) Edit env       dnotification edit-env
-  8) Status         dnotification status
+dnnotification
+  1) Install
+  2) Up
+  3) Down
+  4) Restart
+  5) Update
+  6) Logs
+  7) Edit compose
+  8) Edit env
+  9) Status
   0) Exit
 ```
 
@@ -156,47 +206,102 @@ Reports:
 - Docker CLI / compose plugin / daemon reachability
 - Project, data, voices paths
 - `.env` presence
-- Container state, started-at, healthcheck, published port
+- Image, container state, started-at, healthcheck, published port
+- **Installed version** (read from the container via `docker exec`)
 - HTTP probe of `GET /health`
 
 Use it from cron or a monitoring script — exit code is 0 unless docker itself
 is missing.
 
+### `version`
+
+Prints the running container's version (read from `/app/VERSION` inside the
+container). Falls back to the CLI's own version when the container is not
+running.
+
 ### `edit` / `edit-env`
 
 Opens `docker-compose.yaml` or `.env` in `nano` (falls back to `vim`, then
 `vi`). Uses `sudo` because the files live under `/opt`. Set `$EDITOR` and
-`$SUDO_EDITOR` if you want a different one — currently the script picks
-nano/vim/vi in that order.
+`$SUDO_EDITOR` if you want a different one.
 
 ---
 
-## 6. Updating the deployment
+## 8. Updating the deployment
 
 ```bash
-cd /opt/dn-notification
-sudo git pull                                # pull the latest code
-dnotification restart                        # or: dnotification down && dnotification up
+sudo dnnotification update
 ```
 
-If you changed `docker-compose.yaml` or the `Dockerfile`:
+The `update` flow is deterministic and safe to re-run:
 
-```bash
-dnotification down
-dnotification up --build
-# (`dnotification up` accepts compose flags since it just calls
-#  `docker compose up -d` — pass `--build` or `--force-recreate` as needed.)
-```
+1. **Read installed version** — `docker exec dn-notification cat /app/VERSION`
+   gives the version that is *actually* running, never a guess from the host.
+2. **Read latest VERSION** from `Digitalweb-ir/dn-notification@main`.
+3. **Compare**:
+   * Equal → print `You already have the latest version: <version>` and exit.
+   * Newer → print `A new version is available: <version>` and prompt
+     `Do you want to install it? (yes/no)`. Anything other than `yes`/`y`
+     exits without changes.
+4. **Download deployment files** — `docker-compose.yaml` and `.env.example`
+   into `/opt/dn-notification`.
+5. **Merge `.env`** with the new `.env.example`:
+   * Every existing key/value in `.env` is preserved verbatim.
+   * Any new key in `.env.example` not present in `.env` is prompted for
+     interactively and appended to `.env`.
+   * Re-running the merge is a no-op (idempotent).
+6. **Redeploy containers**:
+   ```bash
+   docker compose down
+   docker rmi digitalneetwork/dn-notification:latest    # force a fresh pull
+   docker compose pull
+   docker compose up -d
+   ```
 
-> Note: `dnotification up` itself only forwards extra args through `cmd_up`.
-> For a one-off rebuild, run `cd /opt/dn-notification && docker compose up -d
-> --build` directly.
+The image is removed before pulling so that the next `pull` is guaranteed to
+fetch a fresh copy even if the registry tag wasn't repushed.
 
 ---
 
-## 7. Backing up and restoring
+## 9. Versioning & release flow
 
-The **only** state worth backing up lives in `/var/lib/dn-notification`:
+The repository root has a single `VERSION` file (semver, e.g. `1.4.2`) that is
+the canonical release version. `app/__init__.py`'s `__version__` is kept in
+lockstep automatically.
+
+Commit messages drive the bump (highest-priority keyword wins):
+
+| Commit prefix  | Bump   | Example result |
+|----------------|--------|----------------|
+| `break: …`     | major  | `1.2.3 -> 2.0.0` |
+| `feat: …`      | minor  | `1.2.3 -> 1.3.0` |
+| `fix: …`       | patch  | `1.2.3 -> 1.2.4` |
+| (none)         | —      | version unchanged |
+
+`version_bump.sh` implements this:
+
+```bash
+./version_bump.sh              # bump in place
+./version_bump.sh --print      # print the bump that would be applied
+./version_bump.sh --since TAG  # override the diff range
+```
+
+It is invoked by `.github/workflows/bump-version.yml` on every push to `main`:
+
+```yaml
+- run: ./version_bump.sh
+- run: git add VERSION app/__init__.py && git commit -m "chore(release): bump to $(cat VERSION)"
+```
+
+If no qualifying commit is found since the last version tag, the version is
+left unchanged and the script exits 0. The image is built with the new
+`VERSION` baked into `/app/VERSION` (see `Dockerfile`'s `COPY VERSION ./VERSION`).
+
+---
+
+## 10. Backing up and restoring
+
+The **only** state worth backing up lives under `/var/lib/dn-notification`:
 
 ```bash
 # Back up session + logs (the session is the critical one).
@@ -205,9 +310,9 @@ sudo tar -czf dn-backup-$(date +%F).tgz \
 
 # Restore.
 sudo systemctl stop dn-notification 2>/dev/null   # if you added a systemd unit
-dnotification down
+dnnotification down
 sudo tar -xzf dn-backup-YYYY-MM-DD.tgz -C /var/lib/dn-notification
-dnotification up
+dnnotification up
 ```
 
 Voice files are immutable templates; you can rebuild them from source control
@@ -215,7 +320,7 @@ or your own asset bucket, so they're not part of the backup.
 
 ---
 
-## 8. Security checklist
+## 11. Security checklist
 
 - [ ] `/var/lib/dn-notification` is `chmod 700` (the install script does this).
 - [ ] `.env` is `chmod 600`.
@@ -231,14 +336,17 @@ or your own asset bucket, so they're not part of the backup.
 
 ---
 
-## 9. Files in this directory
+## 12. Files in this directory
 
-| File                  | What it is                                  |
-|-----------------------|---------------------------------------------|
-| `Dockerfile`          | Production image (Python 3.11 slim, non-root, tini, healthcheck) |
-| `docker-compose.yaml` | Single-service compose file                 |
-| `.env.example`        | Documented env template (copy to `.env`)    |
-| `dnotification`       | The CLI — install to `/usr/local/bin/`      |
+| File                       | What it is                                                |
+|----------------------------|-----------------------------------------------------------|
+| `VERSION`                  | Single source of truth for the release semver            |
+| `version_bump.sh`          | Bumps VERSION based on commit-message keywords           |
+| `Dockerfile`               | Production image (Python 3.11 slim, non-root, tini, healthcheck, copies VERSION) |
+| `docker-compose.yaml`      | Single-service compose file (pulls pre-built image)      |
+| `.env.example`             | Documented env template (copy to `.env`)                 |
+| `dnnotification.sh`        | The CLI — install to `/usr/local/bin/dnnotification`     |
+| `.github/workflows/`       | CI: bumps VERSION on push to `main`                      |
 
 See `../README.md` for application-level docs (API endpoints, n8n usage,
 tuning knobs).

@@ -4,69 +4,69 @@
 # =============================================================================
 #  Manages the dockerized DN Notification (Telegram MTProto automation) service.
 #
-#  Host layout (defaults — override via env vars before running):
-#    PROJECT_DIR = /opt/dn-notification
-#    DATA_DIR    = /var/lib/dn-notification    <- ALL persistent data lives here
-#      ├── session/   Telegram .session file (account credential)
-#      ├── logs/      Application logs
-#      └── voices/    Voice templates (.ogg files)
+#  Source repo (used to fetch docker-compose.yaml / .env.example / VERSION):
+#      https://github.com/Digitalweb-ir/dn-notification  (branch: main)
 #
-#  Project files (docker-compose.yaml, .env) live under PROJECT_DIR.
+#  Docker image:
+#      digitalneetwork/dn-notification:latest
+#
+#  Host layout (paths are hardcoded):
+#      /opt/dn-notification           project files (docker-compose.yaml, .env)
+#      /var/lib/dn-notification       ALL persistent data (bind-mounted in)
+#          ├── session/   Telegram .session file (account credential)
+#          ├── logs/      application logs
+#          └── voices/    voice templates (.ogg)
 #
 #  Usage:
-#    dnnotification                 -> interactive menu
-#    dnnotification <command>       -> run a command
-#    dnnotification help            -> list commands
-#
-#  Git repo used to fetch docker-compose.yaml / .env.example during install.
-#  Edit GIT_REPO at the top of this script if you forked the project.
+#      dnnotification                 -> interactive menu
+#      dnnotification <command>       -> run a command
+#      dnnotification help            -> list commands
 # =============================================================================
 set -Eeuo pipefail
 IFS=$'\n\t'
 
 # -----------------------------------------------------------------------------
-# Config — change GIT_REPO / DOCKER_IMAGE here if you forked the project
+# Constants — single source of truth for repo, branch, and image.
+# If you fork the project, edit these three values and nothing else.
 # -----------------------------------------------------------------------------
-GIT_REPO="https://github.com/erfan/dn-notification"
-GIT_BRANCH="${GIT_BRANCH:-main}"
-RAW_BASE="https://raw.githubusercontent.com/erfan/dn-notification/${GIT_BRANCH}"
+readonly GIT_REPO="https://github.com/Digitalweb-ir/dn-notification"
+readonly GIT_BRANCH="main"
+readonly RAW_BASE="https://raw.githubusercontent.com/Digitalweb-ir/dn-notification/${GIT_BRANCH}"
+readonly DOCKER_IMAGE="digitalneetwork/dn-notification:latest"
+readonly CONTAINER_VERSION_FILE="/app/VERSION"  # baked into the image (Dockerfile)
 
-PROJECT_DIR="${PROJECT_DIR:-/opt/dn-notification}"
-DATA_DIR="${DATA_DIR:-/var/lib/dn-notification}"
-VOICES_DIR="${VOICES_DIR:-${DATA_DIR}/voices}"
-SESSION_DIR="${SESSION_DIR:-${DATA_DIR}/session}"
-LOGS_DIR="${LOGS_DIR:-${DATA_DIR}/logs}"
-COMPOSE_FILE="${COMPOSE_FILE:-${PROJECT_DIR}/docker-compose.yaml}"
-ENV_FILE="${ENV_FILE:-${PROJECT_DIR}/.env}"
-ENV_EXAMPLE="${ENV_EXAMPLE:-${PROJECT_DIR}/.env.example}"
+# -----------------------------------------------------------------------------
+# Filesystem layout
+# -----------------------------------------------------------------------------
+readonly PROJECT_DIR="/opt/dn-notification"
+readonly DATA_DIR="/var/lib/dn-notification"
+readonly VOICES_DIR="${DATA_DIR}/voices"
+readonly SESSION_DIR="${DATA_DIR}/session"
+readonly LOGS_DIR="${DATA_DIR}/logs"
+readonly COMPOSE_FILE="${PROJECT_DIR}/docker-compose.yaml"
+readonly ENV_FILE="${PROJECT_DIR}/.env"
+readonly ENV_EXAMPLE="${PROJECT_DIR}/.env.example"
 
 # Source script (this file) and the install target.
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 SCRIPT_PATH="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)/$(basename "$SCRIPT_PATH")"
-INSTALL_BIN_DIR="${INSTALL_BIN_DIR:-/usr/local/bin}"
-INSTALL_BIN_NAME="${INSTALL_BIN_NAME:-dnnotification}"   # no extension
-INSTALL_BIN_PATH="${INSTALL_BIN_DIR}/${INSTALL_BIN_NAME}"
+readonly INSTALL_BIN_DIR="/usr/local/bin"
+readonly INSTALL_BIN_NAME="dnnotification"   # no extension
+readonly INSTALL_BIN_PATH="${INSTALL_BIN_DIR}/${INSTALL_BIN_NAME}"
 
-HEALTH_URL="${HEALTH_URL:-http://localhost:${HOST_PORT:-8000}/health}"
-SERVICE_NAME="${SERVICE_NAME:-dn-notification}"
-SCRIPT_NAME="dnnotification"   # logical name regardless of how this file is invoked
-SCRIPT_VERSION="2.0.0"
+readonly SERVICE_NAME="dn-notification"
+readonly SCRIPT_NAME="dnnotification"
+readonly SCRIPT_VERSION="2.1.0"
 
 # -----------------------------------------------------------------------------
 # Colors (auto-disabled if stdout isn't a TTY or NO_COLOR is set).
 # -----------------------------------------------------------------------------
 if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-    C_RESET=$'\033[0m'
-    C_BOLD=$'\033[1m'
-    C_DIM=$'\033[2m'
-    C_RED=$'\033[31m'
-    C_GREEN=$'\033[32m'
-    C_YELLOW=$'\033[33m'
-    C_BLUE=$'\033[34m'
-    C_CYAN=$'\033[36m'
+    C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
+    C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
+    C_BLUE=$'\033[34m'; C_CYAN=$'\033[36m'
 else
-    C_RESET=""; C_BOLD=""; C_DIM=""
-    C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_CYAN=""
+    C_RESET=""; C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_CYAN=""
 fi
 
 # -----------------------------------------------------------------------------
@@ -78,9 +78,8 @@ log_warn()    { printf '%s[!]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 log_err()     { printf '%s[X]%s %s\n' "$C_RED"    "$C_RESET" "$*" >&2; }
 log_section() { printf '\n%s== %s ==%s\n' "$C_BOLD$C_CYAN" "$*" "$C_RESET"; }
 
-die() { log_err "$*"; exit 1; }
+die()  { log_err "$*"; exit 1; }
 silent() { "$@" 2>/dev/null || true; }
-# Abort on signals, but don't fire on normal command failures.
 trap 'log_err "Aborted by signal."; exit 130' INT TERM
 
 # -----------------------------------------------------------------------------
@@ -97,9 +96,6 @@ as_root() {
     fi
 }
 
-# -----------------------------------------------------------------------------
-# Privilege gate — `install` and `install-cli` must run as root.
-# -----------------------------------------------------------------------------
 require_root() {
     if [[ $EUID -ne 0 ]]; then
         die "This command must be run as root (try: sudo $SCRIPT_NAME $*)."
@@ -107,7 +103,7 @@ require_root() {
 }
 
 # -----------------------------------------------------------------------------
-# Dependency detection
+# Docker install / check
 # -----------------------------------------------------------------------------
 install_docker() {
     log_section "Installing Docker"
@@ -129,11 +125,9 @@ ensure_docker() {
             die "Docker is required. Re-run after installing it manually."
         fi
     fi
-
     if ! command -v docker >/dev/null 2>&1; then
         die "docker is still not on PATH after install. Check the installer output above."
     fi
-
     if ! docker compose version >/dev/null 2>&1; then
         log_err "docker compose plugin (v2) is not installed."
         cat <<EOF
@@ -145,7 +139,6 @@ ensure_docker() {
 EOF
         die "Install the docker compose v2 plugin and re-run."
     fi
-
     if ! docker info >/dev/null 2>&1; then
         log_err "Cannot communicate with the Docker daemon."
         cat <<EOF
@@ -170,32 +163,19 @@ check_docker() {
 EOF
         return 1
     fi
-
     if ! docker compose version >/dev/null 2>&1; then
         log_err "docker compose plugin is not installed (docker compose v2)."
-        cat <<EOF
-  Install the v2 plugin:
-    Debian/Ubuntu : sudo apt-get install -y docker-compose-plugin
-    macOS         : bundled with Docker Desktop
-EOF
         return 1
     fi
-
     if ! docker info >/dev/null 2>&1; then
         log_err "Cannot communicate with the Docker daemon."
-        cat <<EOF
-  Either:
-    - Start it:  sudo systemctl start docker
-    - Add your user to the docker group:
-        sudo usermod -aG docker \$USER   (then log out and back in)
-EOF
         return 1
     fi
     return 0
 }
 
 # -----------------------------------------------------------------------------
-# Small utilities
+# Utilities
 # -----------------------------------------------------------------------------
 have_curl() { command -v curl >/dev/null 2>&1; }
 
@@ -212,7 +192,6 @@ ask_yes_no() {
     done
 }
 
-# Prompt the user for a value, refusing blank input. Echoes the value to stdout.
 prompt_required() {
     local label="$1"
     local value
@@ -224,6 +203,25 @@ prompt_required() {
         fi
         log_warn "Value cannot be empty."
     done
+}
+
+# Parse "X.Y.Z" into a comparable integer tuple.
+semver_tuple() {
+    local v="$1"
+    [[ "$v" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || { echo "0 0 0"; return 1; }
+    echo "$((BASH_REMATCH[1])) $((BASH_REMATCH[2])) $((BASH_REMATCH[3]))"
+}
+
+# Return 0 if $1 < $2, 1 otherwise (both semver).
+semver_lt() {
+    local a b
+    read -r -a a < <(semver_tuple "$1")
+    read -r -a b < <(semver_tuple "$2")
+    for i in 0 1 2; do
+        if (( a[i] < b[i] )); then return 0; fi
+        if (( a[i] > b[i] )); then return 1; fi
+    done
+    return 1
 }
 
 # -----------------------------------------------------------------------------
@@ -254,15 +252,14 @@ ensure_layout() {
 }
 
 # -----------------------------------------------------------------------------
-# Compose helper — every lifecycle command goes through this so we can enforce
-# a single working directory and consistent error handling.
+# Compose helper — every lifecycle command goes through this.
 # -----------------------------------------------------------------------------
 compose() {
     ( cd "$PROJECT_DIR" && docker compose "$@" )
 }
 
 # -----------------------------------------------------------------------------
-# Install this CLI to /usr/local/bin/dnnotification (extension stripped, +x).
+# Install CLI to /usr/local/bin/dnnotification (extension stripped, +x).
 # Idempotent — re-running just refreshes the file in place.
 # -----------------------------------------------------------------------------
 install_cli() {
@@ -273,9 +270,6 @@ install_cli() {
     fi
 
     as_root install -d -m 0755 "$INSTALL_BIN_DIR"
-
-    # `install` with explicit dest name strips the .sh extension because we
-    # name the destination file as $INSTALL_BIN_NAME (no extension).
     as_root install -m 0755 "$SCRIPT_PATH" "$INSTALL_BIN_PATH"
 
     if [[ -x "$INSTALL_BIN_PATH" ]]; then
@@ -284,7 +278,6 @@ install_cli() {
         die "Install appeared to succeed but $INSTALL_BIN_PATH is not executable."
     fi
 
-    # Confirm it's discoverable on PATH.
     if command -v "$INSTALL_BIN_NAME" >/dev/null 2>&1; then
         log_ok "On PATH: $(command -v "$INSTALL_BIN_NAME")"
     else
@@ -294,7 +287,7 @@ install_cli() {
 }
 
 # -----------------------------------------------------------------------------
-# Download deployment files from GitHub
+# Download deployment files from the GitHub repo
 # -----------------------------------------------------------------------------
 fetch_from_repo() {
     local relpath="$1" dest="$2"
@@ -302,7 +295,7 @@ fetch_from_repo() {
     log_info "Downloading $url"
     have_curl || die "curl is required to fetch deployment files."
     if ! curl -fsSL --retry 3 -o "$dest" "$url"; then
-        die "Failed to download $relpath from $url — check GIT_REPO/GIT_BRANCH."
+        die "Failed to download $relpath from $url — check your network."
     fi
     log_ok "Wrote $dest"
 }
@@ -316,26 +309,66 @@ download_deployment_files() {
 }
 
 # -----------------------------------------------------------------------------
-# Interactive .env generation
+# .env generation and merging
 # -----------------------------------------------------------------------------
+
+# Extract every "KEY=..." (KEY=^[A-Za-z_][A-Za-z0-9_]*$) line from a file.
+# Emits "KEY|VALUE" pairs, in file order, with comments and blank lines
+# stripped. Empty values are preserved.
+parse_env_file() {
+    local file="$1"
+    [[ -f "$file" ]] || return 0
+    local line key val
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Strip leading whitespace, ignore blanks/comments.
+        line="${line#"${line%%[![:space:]]*}"}"
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        # Match KEY=VALUE.
+        if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            val="${BASH_REMATCH[2]}"
+            printf '%s|%s\n' "$key" "$val"
+        fi
+    done < "$file"
+}
+
+# Build a list of "KEY|DEFAULT" pairs from .env.example: every KEY that the
+# template documents, paired with its example default (often a placeholder).
+parse_env_example() {
+    parse_env_file "$1"
+}
+
+# Write $key=$val to $ENV_FILE, creating/overwriting just that line.
+# Preserves all other content of the file.
+upsert_env_var() {
+    local file="$1" key="$2" val="$3"
+    local tmp
+    tmp=$(mktemp)
+    # If the key already exists, replace its line; else append.
+    if grep -qE "^${key}=" "$file" 2>/dev/null; then
+        # Use a delimiter unlikely to appear in user input.
+        awk -v k="$key" -v v="$val" 'BEGIN{FS=OFS="="} $1==k {$2=v; print; next} {print}' \
+            "$file" > "$tmp"
+    else
+        cat "$file" > "$tmp"
+        printf '%s=%s\n' "$key" "$val" >> "$tmp"
+    fi
+    mv "$tmp" "$file"
+}
+
 generate_env_file() {
     log_section "Configure environment"
     log_info "Prompts cannot be skipped — required values only. You can"
     log_info "fine-tune other settings later with: $SCRIPT_NAME edit-env"
 
-    local tg_api_id tg_api_hash tg_phone api_key
+    [[ -f "$ENV_EXAMPLE" ]] || die "Missing template $ENV_EXAMPLE — re-run install."
 
+    local tg_api_id tg_api_hash tg_phone api_key
     tg_api_id=$(prompt_required "Telegram API ID (https://my.telegram.org/apps)")
     tg_api_hash=$(prompt_required "Telegram API hash")
     tg_phone=$(prompt_required "Telegram phone (international format, e.g. +1234567890)")
     api_key=$(prompt_required "API_KEY (long random string for X-API-KEY auth)")
 
-    if [[ ! -f "$ENV_EXAMPLE" ]]; then
-        die "Missing template $ENV_EXAMPLE — re-run install or download it manually."
-    fi
-
-    # Substitute placeholders in the template. Use awk so the values are
-    # written verbatim (no shell expansion of user input).
     local content
     content=$(awk \
         -v id="$tg_api_id" \
@@ -355,6 +388,53 @@ generate_env_file() {
     log_ok "Wrote $ENV_FILE (mode 600)"
 }
 
+# Merge an existing .env with a fresh .env.example. The result keeps every
+# KEY=VALUE already in .env (no overwrites) and, for any KEY in the new
+# template that .env does not contain, prompts the user interactively for a
+# value and appends it.
+#
+# If no .env exists, behaves like an interactive install (subset of
+# generate_env_file): prompts for every key in the template.
+merge_env_file() {
+    log_section "Merging .env with new .env.example"
+
+    if [[ ! -f "$ENV_FILE" ]]; then
+        log_warn "No existing $ENV_FILE — running first-time setup."
+        generate_env_file
+        return
+    fi
+    if [[ ! -f "$ENV_EXAMPLE" ]]; then
+        log_warn "No $ENV_EXAMPLE to merge against — keeping existing .env untouched."
+        return
+    fi
+
+    # Use a temp file as a "set of existing keys" so we don't need bash 4+
+    # associative arrays. Each line is one existing key.
+    local keyset
+    keyset=$(mktemp)
+    parse_env_file "$ENV_FILE" | awk -F'|' '{print $1}' > "$keyset"
+
+    local added=0 skipped=0 line key val new_val
+    while IFS='|' read -r key val; do
+        [[ -z "$key" ]] && continue
+        if grep -qxF "$key" "$keyset"; then
+            skipped=$((skipped + 1))
+            continue
+        fi
+        log_info "New key in .env.example: $key (current default: ${val:-<empty>})"
+        new_val=$(prompt_required "  value for $key")
+        upsert_env_var "$ENV_FILE" "$key" "$new_val"
+        # Update the keyset so later iterations see the key as present
+        # (protects against duplicate keys in the same template).
+        printf '%s\n' "$key" >> "$keyset"
+        added=$((added + 1))
+    done < <(parse_env_example "$ENV_EXAMPLE")
+
+    rm -f "$keyset"
+    as_root chmod 600 "$ENV_FILE"
+    log_ok "Merged .env: $added new key(s) added, $skipped existing key(s) preserved."
+}
+
 # -----------------------------------------------------------------------------
 # Reinstall confirmation
 # -----------------------------------------------------------------------------
@@ -372,6 +452,20 @@ confirm_reinstall() {
 }
 
 # -----------------------------------------------------------------------------
+# Container version reading
+# -----------------------------------------------------------------------------
+container_is_running() {
+    silent docker ps --format '{{.Names}}' | grep -qx "$SERVICE_NAME"
+}
+
+read_installed_version() {
+    if ! container_is_running; then
+        return 1
+    fi
+    docker exec "$SERVICE_NAME" cat "$CONTAINER_VERSION_FILE" 2>/dev/null | tr -d '[:space:]'
+}
+
+# -----------------------------------------------------------------------------
 # Commands
 # -----------------------------------------------------------------------------
 cmd_install() {
@@ -379,22 +473,16 @@ cmd_install() {
     require_root "$@"
 
     confirm_reinstall
-
     ensure_docker
     ensure_layout
     download_deployment_files
     generate_env_file
-
-    # Install (or refresh) the CLI itself.
     install_cli
 
-    # Make sure voices dir isn't empty — it's confusing for new users.
     if [[ -z "$(ls -A "$VOICES_DIR" 2>/dev/null)" ]]; then
         log_warn "$VOICES_DIR is empty. Drop at least one .ogg file (e.g. limited.ogg) before /send-voice will work."
     fi
 
-    # Bring the stack up. Image is pulled (not built) because compose.yaml
-    # references a pre-built image with no `build:` context.
     if [[ -f "$COMPOSE_FILE" ]]; then
         log_info "Pulling image and starting services…"
         compose pull
@@ -440,21 +528,70 @@ cmd_logs() {
     compose logs -f "$@"
 }
 
-cmd_pull() {
-    check_docker
-    [[ -f "$COMPOSE_FILE" ]] || die "No compose file at $COMPOSE_FILE."
-    log_info "Pulling latest image…"
-    compose pull
-}
-
 cmd_update() {
     check_docker
-    [[ -f "$COMPOSE_FILE" ]] || die "No compose file at $COMPOSE_FILE."
-    log_info "Re-downloading deployment files from $GIT_REPO…"
+    [[ -f "$COMPOSE_FILE" ]] || die "No compose file at $COMPOSE_FILE — run '$SCRIPT_NAME install' first."
+
+    log_section "Update"
+
+    # Step 1: read installed version from the running container.
+    local installed
+    if ! installed=$(read_installed_version); then
+        die "Container $SERVICE_NAME is not running. Start it with '$SCRIPT_NAME up' first."
+    fi
+    log_info "Installed version (from container): $installed"
+
+    # Step 2: read the latest VERSION from the GitHub repo.
+    local latest
+    latest=$(curl -fsSL "${RAW_BASE}/VERSION" | tr -d '[:space:]') \
+        || die "Failed to fetch latest VERSION from $RAW_BASE/VERSION."
+    log_info "Latest version (from $GIT_REPO): $latest"
+
+    # Step 3: compare.
+    if [[ "$installed" == "$latest" ]]; then
+        printf '%sYou already have the latest version: %s%s\n' "$C_GREEN" "$installed" "$C_RESET"
+        exit 0
+    fi
+
+    if ! semver_lt "$installed" "$latest"; then
+        # Installed is actually newer than upstream (e.g. dev build) — warn but
+        # still let the user proceed if they want.
+        log_warn "Installed version ($installed) is newer than upstream ($latest)."
+    fi
+
+    printf '%sA new version is available: %s%s\n' "$C_CYAN" "$latest" "$C_RESET"
+    local reply
+    while true; do
+        read -r -p "Do you want to install it? (yes/no): " reply
+        case "${reply,,}" in
+            yes|y) break ;;
+            no|n|"") die "Update cancelled by user." ;;
+            *) printf "Please answer yes or no.\n" ;;
+        esac
+    done
+
+    # Download latest deployment files.
     download_deployment_files
-    log_info "Pulling latest image…"
+
+    # Merge .env against the new .env.example (preserves user settings,
+    # prompts for any newly introduced keys).
+    merge_env_file
+
+    # Redeploy: stop, remove the old image to force a fresh pull, pull, up.
+    log_section "Redeploying"
+    log_info "Stopping the running container…"
+    compose down
+
+    if docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
+        log_info "Removing existing image $DOCKER_IMAGE to force a fresh pull…"
+        as_root docker rmi "$DOCKER_IMAGE" >/dev/null 2>&1 || \
+            log_warn "Could not remove $DOCKER_IMAGE (continuing anyway)."
+    fi
+
+    log_info "Pulling $DOCKER_IMAGE…"
     compose pull
-    log_info "Restarting with new image…"
+
+    log_info "Starting the new container…"
     compose up -d
     cmd_status
 }
@@ -475,9 +612,20 @@ cmd_edit() {
 
 cmd_edit_env() { cmd_edit "$ENV_FILE"; }
 
+cmd_version() {
+    if container_is_running; then
+        local v
+        v=$(read_installed_version)
+        if [[ -n "$v" ]]; then
+            printf '%s %s (container)\n' "$SCRIPT_NAME" "$v"
+            return
+        fi
+    fi
+    printf '%s %s (no running container)\n' "$SCRIPT_NAME" "$SCRIPT_VERSION"
+}
+
 cmd_status() {
     log_section "Status"
-    # Docker available?
     if ! command -v docker >/dev/null 2>&1; then
         log_err "docker: NOT INSTALLED"
         return 0
@@ -491,8 +639,11 @@ cmd_status() {
         printf '  %s%-12s%s %s\n' "$C_BOLD" "daemon"      "$C_RESET" "ok"
     else
         printf '  %s%-12s%s %s\n' "$C_BOLD" "daemon"      "$C_RESET" "unreachable"
-        return 0   # report what we know, don't abort
+        return 0
     fi
+
+    # Image
+    printf '  %s%-12s%s %s\n' "$C_BOLD" "image"       "$C_RESET" "$DOCKER_IMAGE"
 
     # Layout
     printf '  %s%-12s%s %s\n' "$C_BOLD" "project"     "$C_RESET" "$PROJECT_DIR"
@@ -501,15 +652,18 @@ cmd_status() {
     printf '  %s%-12s%s %s\n' "$C_BOLD" "env file"    "$C_RESET" "$([ -f "$ENV_FILE" ] && echo present || echo MISSING)"
 
     # Container
-    if silent docker ps --format '{{.Names}}' | grep -qx "$SERVICE_NAME"; then
-        local state uptime health port
+    if container_is_running; then
+        local state uptime health port version
         state=$(docker inspect -f '{{.State.Status}}' "$SERVICE_NAME" 2>/dev/null || echo "?")
         uptime=$(docker inspect -f '{{.State.StartedAt}}' "$SERVICE_NAME" 2>/dev/null || echo "?")
         health=$(docker inspect -f '{{.State.Health.Status}}' "$SERVICE_NAME" 2>/dev/null || echo "none")
         port=$(silent docker port "$SERVICE_NAME" 8000 | head -n1)
         [[ -z "$port" ]] && port="?"
+        version=$(read_installed_version)
+        [[ -z "$version" ]] && version="?"
 
         printf '  %s%-12s%s %s\n' "$C_BOLD" "container"   "$C_RESET" "${C_GREEN}running${C_RESET}"
+        printf '  %s%-12s%s %s\n' "$C_BOLD" "version"     "$C_RESET" "$version"
         printf '  %s%-12s%s %s\n' "$C_BOLD" "state"       "$C_RESET" "$state"
         printf '  %s%-12s%s %s\n' "$C_BOLD" "started"     "$C_RESET" "$uptime"
         printf '  %s%-12s%s %s\n' "$C_BOLD" "health"      "$C_RESET" "$health"
@@ -519,12 +673,13 @@ cmd_status() {
     fi
 
     # HTTP health (best-effort)
+    local health_url="http://localhost:${HOST_PORT:-8000}/health"
     printf '  %s%-12s%s ' "$C_BOLD" "http" "$C_RESET"
     if command -v curl >/dev/null 2>&1; then
-        if silent curl -fsS --max-time 3 "$HEALTH_URL" >/dev/null; then
-            printf '%sok%s (%s)\n' "$C_GREEN" "$C_RESET" "$HEALTH_URL"
+        if silent curl -fsS --max-time 3 "$health_url" >/dev/null; then
+            printf '%sok%s (%s)\n' "$C_GREEN" "$C_RESET" "$health_url"
         else
-            printf '%sunreachable%s (%s)\n' "$C_RED" "$C_RESET" "$HEALTH_URL"
+            printf '%sunreachable%s (%s)\n' "$C_RED" "$C_RESET" "$health_url"
         fi
     else
         printf '%sskipped%s (install curl)\n' "$C_DIM" "$C_RESET"
@@ -535,24 +690,24 @@ cmd_status() {
 # Interactive menu
 # -----------------------------------------------------------------------------
 menu_banner() {
-    printf '%s+----------------------------------+%s\n' "$C_BOLD" "$C_RESET"
-    printf '%s|   DN Notification Manager v%-7s|%s\n' "$C_BOLD$C_CYAN" "$SCRIPT_VERSION" "$C_RESET"
-    printf '%s+----------------------------------+%s\n' "$C_BOLD" "$C_RESET"
+    printf '%s+-------------------------------------+%s\n' "$C_BOLD" "$C_RESET"
+    printf '%s|   DN Notification Manager v%-7s |%s\n' "$C_BOLD$C_CYAN" "$SCRIPT_VERSION" "$C_RESET"
+    printf '%s+-------------------------------------+%s\n' "$C_BOLD" "$C_RESET"
 }
 
 menu_loop() {
     while true; do
         menu_banner
-        printf '  %s1)%s Install\n'                "$C_BOLD" "$C_RESET"
-        printf '  %s2)%s Up\n'                    "$C_BOLD" "$C_RESET"
-        printf '  %s3)%s Down\n'                  "$C_BOLD" "$C_RESET"
-        printf '  %s4)%s Restart\n'               "$C_BOLD" "$C_RESET"
-        printf '  %s5)%s Update (re-download + pull)\n' "$C_BOLD" "$C_RESET"
-        printf '  %s6)%s Logs (follow)\n'         "$C_BOLD" "$C_RESET"
-        printf '  %s7)%s Edit docker-compose\n'   "$C_BOLD" "$C_RESET"
-        printf '  %s8)%s Edit .env\n'             "$C_BOLD" "$C_RESET"
-        printf '  %s9)%s Status\n'                "$C_BOLD" "$C_RESET"
-        printf '  %s0)%s Exit\n'                  "$C_BOLD" "$C_RESET"
+        printf '  %s1)%s Install\n'                       "$C_BOLD" "$C_RESET"
+        printf '  %s2)%s Up\n'                           "$C_BOLD" "$C_RESET"
+        printf '  %s3)%s Down\n'                         "$C_BOLD" "$C_RESET"
+        printf '  %s4)%s Restart\n'                      "$C_BOLD" "$C_RESET"
+        printf '  %s5)%s Update (check + merge + redeploy)\n' "$C_BOLD" "$C_RESET"
+        printf '  %s6)%s Logs (follow)\n'                "$C_BOLD" "$C_RESET"
+        printf '  %s7)%s Edit docker-compose\n'          "$C_BOLD" "$C_RESET"
+        printf '  %s8)%s Edit .env\n'                    "$C_BOLD" "$C_RESET"
+        printf '  %s9)%s Status\n'                       "$C_BOLD" "$C_RESET"
+        printf '  %s0)%s Exit\n'                         "$C_BOLD" "$C_RESET"
         printf '\n'
         local choice
         read -r -p "Select [0-9]: " choice
@@ -592,23 +747,18 @@ Commands:
   down           docker compose down
   restart        docker compose restart
   logs           docker compose logs -f
-  pull           docker compose pull (refresh the image)
-  update         Re-download compose/.env.example, pull image, restart
+  update         Check installed version, merge .env, redeploy with new image
   edit           Open docker-compose.yaml in an editor
   edit-env       Open .env in an editor
+  version        Print installed version (read from the running container)
   status         Show docker / container / health status
   help           Show this help
-  version        Print version
 
-Layout (override with env vars PROJECT_DIR / DATA_DIR / VOICES_DIR):
-  Project : $PROJECT_DIR
-  Data    : $DATA_DIR
-    session : $SESSION_DIR
-    logs    : $LOGS_DIR
-    voices  : $VOICES_DIR
-
-Source repo for install-time downloads (edit GIT_REPO at the top of the script):
+Source repo (hardcoded):
   $GIT_REPO  (branch: $GIT_BRANCH)
+
+Docker image (hardcoded):
+  $DOCKER_IMAGE
 EOF
 }
 
@@ -628,13 +778,12 @@ main() {
         down)           shift; cmd_down "$@" ;;
         restart)        shift; cmd_restart "$@" ;;
         logs)           shift; cmd_logs "$@" ;;
-        pull)           shift; cmd_pull "$@" ;;
         update)         shift; cmd_update "$@" ;;
         edit)           shift; cmd_edit "$@" ;;
         edit-env)       shift; cmd_edit_env "$@" ;;
+        version)        shift; cmd_version "$@" ;;
         status)         shift; cmd_status "$@" ;;
         help|-h|--help) usage ;;
-        version|-v|--version) printf '%s %s\n' "$SCRIPT_NAME" "$SCRIPT_VERSION" ;;
         *) die "Unknown command: $1 (try '$SCRIPT_NAME help')" ;;
     esac
 }

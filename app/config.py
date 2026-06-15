@@ -33,14 +33,24 @@ class Settings(BaseSettings):
     search_top_matches: int = 3
     search_cache_ttl: int = 300
 
-    # Persistent storage — defaults match the in-container layout under
-    # /var/lib/dn-notification, which is bind-mounted from the same path
-    # on the host (see docker-compose.yaml). Override when running uvicorn
-    # directly outside of compose.
+    # Persistent storage — DATA_DIR is the only path the user configures.
+    # The voices, session, and logs sub-directories are derived from it
+    # so there's exactly one source of truth. The host bind-mount in
+    # docker-compose.yaml maps DATA_DIR on the host onto the same path
+    # inside the container.
     data_dir: str = "/var/lib/dn-notification"
-    voices_dir: str = "/var/lib/dn-notification/voices"
-    session_dir: str = "/var/lib/dn-notification/session"
-    logs_dir: str = "/var/lib/dn-notification/logs"
+
+    @property
+    def voices_dir(self) -> str:
+        return f"{self.data_dir}/voices"
+
+    @property
+    def session_dir(self) -> str:
+        return f"{self.data_dir}/session"
+
+    @property
+    def logs_dir(self) -> str:
+        return f"{self.data_dir}/logs"
 
     @property
     def session_path(self) -> Path:

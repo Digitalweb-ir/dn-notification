@@ -45,6 +45,10 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 COPY app ./app
 
+# Single source of truth for the image version. Read at runtime by the
+# CLI's update flow to compare against the latest published version.
+COPY VERSION ./VERSION
+
 # Persistent data lives under /var/lib/dn-notification. The host bind-mounts
 # the same path from the host into the container (see docker-compose.yaml), so:
 #   /var/lib/dn-notification/session   -> Telegram .session file

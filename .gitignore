@@ -32,3 +32,4 @@ logs/
 .vscode/
 .idea/
 .DS_Store
+.claude/
