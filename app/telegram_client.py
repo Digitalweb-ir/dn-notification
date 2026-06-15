@@ -45,7 +45,34 @@ class TelegramService:
             # Make sure the session directory exists; Telethon will create
             # the .session file inside it on first connect.
             session_path = self.settings.session_path
-            session_path.parent.mkdir(parents=True, exist_ok=True)
+            session_dir = session_path.parent
+            try:
+                session_dir.mkdir(parents=True, exist_ok=True)
+            except PermissionError as exc:
+                # The session dir is bind-mounted from the host. The install
+                # script sets it to mode 700 owned by UID 1000 to match the
+                # in-container service user. If the host-side ownership is
+                # wrong (e.g. dir was created by Docker as root, or an older
+                # install used a different UID), the in-container non-root
+                # process can't traverse it. Surface a clear diagnostic.
+                stat_info = None
+                try:
+                    stat_info = session_dir.stat()
+                except OSError:
+                    pass
+                uid_gid = (
+                    f"uid={stat_info.st_uid} gid={stat_info.st_gid}"
+                    if stat_info is not None
+                    else "stat failed"
+                )
+                raise RuntimeError(
+                    f"Cannot create session directory {session_dir} ({uid_gid}); "
+                    f"the container is running as uid={os.getuid()}. "
+                    f"On the host, run: "
+                    f"`sudo chown -R 1000:1000 {session_dir} && "
+                    f"sudo chmod 700 {session_dir}`. "
+                    f"Original error: {exc}"
+                ) from exc
             self.client = TelegramClient(
                 str(session_path),
                 self.settings.tg_api_id,
