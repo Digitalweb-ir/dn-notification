@@ -24,8 +24,7 @@ asks for your Telegram credentials. The image
 **`digitalneetwork/dn-notification:latest`** is pulled and started automatically:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Digitalweb-ir/dn-notification/main/dnnotification.sh \
-    | sudo bash -s -- install
+bash -c "$(curl -L https://raw.githubusercontent.com/Digitalweb-ir/dn-notification/main/dnnotification.sh)" @ install
 ```
 
 After it finishes, `dnnotification` is on `PATH` and the stack is running.
