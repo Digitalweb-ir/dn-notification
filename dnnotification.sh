@@ -47,9 +47,16 @@ readonly COMPOSE_FILE="${PROJECT_DIR}/docker-compose.yaml"
 readonly ENV_FILE="${PROJECT_DIR}/.env"
 readonly ENV_EXAMPLE="${PROJECT_DIR}/.env.example"
 
-# Source script (this file) and the install target.
-SCRIPT_PATH="${BASH_SOURCE[0]}"
-SCRIPT_PATH="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)/$(basename "$SCRIPT_PATH")"
+# Source script (this file). BASH_SOURCE is a bash-only array that is only
+# populated when the script is loaded from a file. When invoked via stdin
+# (e.g. `curl ... | sudo bash -s -- install`), BASH_SOURCE[0] is unset, and
+# `set -u` would abort the script. In that case we leave SCRIPT_PATH empty and
+# install_cli() self-heals by re-fetching a copy from the canonical repo.
+if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+    SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+else
+    SCRIPT_PATH=""
+fi
 readonly INSTALL_BIN_DIR="/usr/local/bin"
 readonly INSTALL_BIN_NAME="dnnotification"   # no extension
 readonly INSTALL_BIN_PATH="${INSTALL_BIN_DIR}/${INSTALL_BIN_NAME}"
@@ -265,8 +272,21 @@ compose() {
 install_cli() {
     log_section "Install CLI"
 
-    if [[ ! -f "$SCRIPT_PATH" ]]; then
-        die "Could not locate this script at $SCRIPT_PATH — refusing to self-install."
+    # Self-install needs a copy of the script on disk. When invoked as
+    # `curl ... | sudo bash -s -- install` there is no source file (BASH_SOURCE
+    # is unset), so re-fetch the script from the canonical repo into a temp
+    # file and use that as the install source.
+    if [[ -z "$SCRIPT_PATH" || ! -f "$SCRIPT_PATH" ]]; then
+        log_info "Script source not on disk; fetching a fresh copy for self-install."
+        have_curl || die "curl is required to fetch the script for self-install."
+        local fetched
+        fetched=$(mktemp) || die "Could not create temp file for self-install."
+        # shellcheck disable=SC2064  # we want $fetched captured NOW, not at trap time.
+        trap "rm -f '$fetched'" RETURN
+        curl -fsSL --retry 3 -o "$fetched" "${RAW_BASE}/${SCRIPT_NAME}.sh" \
+            || die "Failed to download ${RAW_BASE}/${SCRIPT_NAME}.sh."
+        chmod 0755 "$fetched"
+        SCRIPT_PATH="$fetched"
     fi
 
     as_root install -d -m 0755 "$INSTALL_BIN_DIR"

@@ -23,7 +23,7 @@ Deploy on any Linux host with Docker. The installer downloads the
 asks for your Telegram credentials. The image
 **`digitalneetwork/dn-notification:latest`** is pulled and started automatically:
 
-```bash
+```bash  
 bash -c "$(curl -L https://raw.githubusercontent.com/Digitalweb-ir/dn-notification/main/dnnotification.sh)" @ install
 ```
 
@@ -129,12 +129,12 @@ container always reports its real release.
 `version_bump.sh` reads commit messages since the last version tag and bumps
 accordingly:
 
-| Commit prefix  | Bump   | Example result |
-|----------------|--------|----------------|
-| `break: …`     | major  | `1.2.3 -> 2.0.0` |
-| `feat: …`      | minor  | `1.2.3 -> 1.3.0` |
-| `fix: …`       | patch  | `1.2.3 -> 1.2.4` |
-| (none)         | —      | version unchanged |
+| Commit prefix | Bump  | Example result    |
+| ------------- | ----- | ----------------- |
+| `break: …`    | major | `1.2.3 -> 2.0.0`  |
+| `feat: …`     | minor | `1.2.3 -> 1.3.0`  |
+| `fix: …`      | patch | `1.2.3 -> 1.2.4`  |
+| (none)        | —     | version unchanged |
 
 It is invoked by `.github/workflows/bump-version.yml` on every push to `main`.
 
@@ -300,12 +300,12 @@ curl -X POST http://localhost:8000/send-voice \
 
 Templates map to files in `app/voices/`:
 
-| template  | file           |
-|-----------|----------------|
-| expired   | expired.ogg    |
-| welcome   | welcome.ogg    |
-| support   | support.ogg    |
-| custom    | (uses welcome.ogg) |
+| template | file               |
+| -------- | ------------------ |
+| expired  | expired.ogg        |
+| welcome  | welcome.ogg        |
+| support  | support.ogg        |
+| custom   | (uses welcome.ogg) |
 
 > The service refuses to send to bots or non-user entities as a safety
 > check. Telegram `FloodWaitError`s are awaited and retried automatically.
@@ -316,20 +316,20 @@ Templates map to files in `app/voices/`:
 
 The only path you set is `DATA_DIR`; everything else is derived from it.
 
-| Env var                   | Default                              | Description                                  |
-|---------------------------|--------------------------------------|----------------------------------------------|
-| `TG_API_ID`               | —                                    | From my.telegram.org                         |
-| `TG_API_HASH`             | —                                    | From my.telegram.org                         |
-| `TG_PHONE`                | —                                    | Phone number in international format         |
-| `TG_SESSION_NAME`         | `telegram_session`                   | Name of the persistent .session file         |
-| `API_KEY`                 | —                                    | Required `X-API-KEY` header value            |
-| `HOST` / `PORT`           | `0.0.0.0` / `8000`                   | Bind address                                 |
-| `HOST_PORT`               | `8000`                               | Host port mapping in docker-compose          |
-| `LOG_LEVEL`               | `INFO`                               | Log level                                    |
-| `SEARCH_LIMIT_PER_CHAT`   | `200`                                | Max messages fetched per dialog at warmup   |
-| `SEARCH_TOP_MATCHES`      | `3`                                  | Max matches returned per chat               |
-| `SEARCH_CACHE_TTL`        | `300`                                | Seconds before dialog cache is refreshed     |
-| `DATA_DIR`                | `/var/lib/dn-notification`           | Persistent data root (in-container) — voices/session/logs are derived from this |
+| Env var                 | Default                    | Description                                                                     |
+| ----------------------- | -------------------------- | ------------------------------------------------------------------------------- |
+| `TG_API_ID`             | —                          | From my.telegram.org                                                            |
+| `TG_API_HASH`           | —                          | From my.telegram.org                                                            |
+| `TG_PHONE`              | —                          | Phone number in international format                                            |
+| `TG_SESSION_NAME`       | `telegram_session`         | Name of the persistent .session file                                            |
+| `API_KEY`               | —                          | Required `X-API-KEY` header value                                               |
+| `HOST` / `PORT`         | `0.0.0.0` / `8000`         | Bind address                                                                    |
+| `HOST_PORT`             | `8000`                     | Host port mapping in docker-compose                                             |
+| `LOG_LEVEL`             | `INFO`                     | Log level                                                                       |
+| `SEARCH_LIMIT_PER_CHAT` | `200`                      | Max messages fetched per dialog at warmup                                       |
+| `SEARCH_TOP_MATCHES`    | `3`                        | Max matches returned per chat                                                   |
+| `SEARCH_CACHE_TTL`      | `300`                      | Seconds before dialog cache is refreshed                                        |
+| `DATA_DIR`              | `/var/lib/dn-notification` | Persistent data root (in-container) — voices/session/logs are derived from this |
 
 The deployment image and the GitHub repo are **not** configurable:
 
