@@ -96,7 +96,7 @@ package.json              # Minimal Node manifest; pins semantic-release for CI
 release.config.cjs        # semantic-release configuration
 write-version.sh          # Writes VERSION and app/__init__.py for a new release
 docker-compose.yaml       # Single-service compose file (uses pre-built image)
-Dockerfile                # Production image (Python 3.11 slim, non-root, tini, healthcheck)
+Dockerfile                # Production image (Python 3.11 slim, runs as root, tini, healthcheck)
 .env.example              # Documented env template (copy to .env)
 .github/workflows/        # CI: semantic-release + Docker image publish on main
 ```

@@ -5,12 +5,11 @@ services:
     # pulls a fresh copy to guarantee the new release is in use.
     image: digitalneetwork/dn-notification:latest
     restart: always
-    # The container's entrypoint (docker-entrypoint.sh) fixes ownership
-    # of the bind-mounted DATA_DIR and then drops privileges to the
-    # in-image `svc` user (uid/gid 1000) before exec'ing the CMD. We
-    # therefore do NOT set `user: "1000:1000"` here — doing so would
-    # make the entire process tree non-root, including the entrypoint,
-    # which would prevent the chown from working.
+    # The container runs as root. The bind-mounted $DATA_DIR is created
+    # and owned by root on the host (by the install script on Linux, or
+    # by the Docker Desktop VM on macOS), so root in the container is
+    # the natural owner of every file it touches. No `user:` override
+    # is needed.
     env_file:
       - .env
     environment:

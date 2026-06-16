@@ -251,21 +251,14 @@ ensure_layout() {
     as_root mkdir -p "$PROJECT_DIR"
     as_root mkdir -p "$DATA_DIR" "$SESSION_DIR" "$LOGS_DIR" "$VOICES_DIR"
 
-    # The data directory holds the Telegram session (full account access if
-    # leaked), so lock it down. Voices and logs are world-readable.
-    as_root chmod 700 "$DATA_DIR"
-    as_root chmod 700 "$SESSION_DIR"
-    as_root chmod 755 "$LOGS_DIR"
-    as_root chmod 755 "$VOICES_DIR"
+    # Mode 755 (owner rwx, group+other r-x) is the simplest setup that
+    # works for a rootful container: install runs as root, so the dirs
+    # are owned by root on the host, and root inside the container
+    # matches that ownership and can read/write everything. No chown is
+    # needed because there is no in-image non-root service user to align
+    # with.
+    as_root chmod 755 "$DATA_DIR" "$SESSION_DIR" "$LOGS_DIR" "$VOICES_DIR"
 
-    # Hand the bind-mount to UID 1000:1000 so the in-container service user
-    # (Dockerfile: `useradd --uid 1000 svc`, compose: `user: "1000:1000"`) can
-    # write to it. We do this unconditionally — `chown` operates on the
-    # bind-mounted directory contents, it does NOT require a UID 1000 user
-    # to exist on the host. Skipping this when the host has no UID 1000 user
-    # leaves the dir owned by root with mode 700, and the container process
-    # then crashes with PermissionError on the first `mkdir` / `stat`.
-    as_root chown -R 1000:1000 "$DATA_DIR"
     log_ok "Project dir: $PROJECT_DIR"
     log_ok "Data dir:    $DATA_DIR"
     log_ok "  ├─ session: $SESSION_DIR"

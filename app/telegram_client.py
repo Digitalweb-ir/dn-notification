@@ -50,17 +50,13 @@ class TelegramService:
                 session_dir.mkdir(parents=True, exist_ok=True)
             except PermissionError as exc:
                 # The session dir is bind-mounted from the host. The
-                # container's entrypoint (docker-entrypoint.sh) is
-                # supposed to have chowned $DATA_DIR to the in-container
-                # service user (uid 1000) on every start. If we still
-                # see a permission error, the chown likely failed —
-                # most often because the host filesystem is read-only,
-                # the bind-mount was started with an unusual option
-                # (`:ro`, `:uid=...`), or the image is being run
-                # without the entrypoint (e.g. `docker run` with a
-                # custom entrypoint that bypasses the fixup). Surface
-                # a clear diagnostic that points the user at both
-                # the auto-fix and the manual fallback.
+                # container runs as root, and the install script creates
+                # the host directory as root with mode 755, so a
+                # PermissionError here means the bind-mount is not what
+                # we expect — for example, the host directory was
+                # created by a different user, or its mode has been
+                # changed by hand. Surface a clear diagnostic and the
+                # host-side fix.
                 stat_info = None
                 try:
                     stat_info = session_dir.stat()
@@ -75,11 +71,9 @@ class TelegramService:
                     f"Cannot create session directory {session_dir} ({uid_gid}); "
                     f"the container is running as uid={os.getuid()}. "
                     f"This usually means the bind-mounted host directory is not "
-                    f"writable by the in-container service user. The image's "
-                    f"entrypoint (docker-entrypoint.sh) is supposed to fix this on "
-                    f"every start; if the error persists, run on the host: "
-                    f"`sudo chown -R 1000:1000 {session_dir} && "
-                    f"sudo chmod 700 {session_dir}`. "
+                    f"writable. On the host, run `sudo chmod -R 755 "
+                    f"{session_dir}` (or re-run `dnnotification install` "
+                    f"to recreate the layout with the correct permissions). "
                     f"Original error: {exc}"
                 ) from exc
             self.client = TelegramClient(

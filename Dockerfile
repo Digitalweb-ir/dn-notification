@@ -37,7 +37,6 @@ RUN apt-get update \
         curl \
         ca-certificates \
         tini \
-        gosu \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
@@ -57,19 +56,13 @@ COPY VERSION ./VERSION
 #   /var/lib/dn-notification/voices    -> voice templates (.ogg)
 RUN mkdir -p /var/lib/dn-notification/session /var/lib/dn-notification/logs /var/lib/dn-notification/voices
 
-# Non-root user. UID 1000 matches the typical first non-root user on Linux
-# hosts, which keeps bind-mount ownership predictable.
-RUN useradd --create-home --shell /usr/sbin/nologin --uid 1000 svc \
-    && chown -R svc:svc /app /var/lib/dn-notification
-
-# Entrypoint fixes ownership of $DATA_DIR (the bind-mount target) on every
-# start — host-side ownership can change between deploys and the image's
-# build-time chown does not apply to bind-mounted paths — then drops
-# privileges to svc via gosu and execs the CMD.
+# The container runs as root. There is no in-image service user: the
+# bind-mounted $DATA_DIR is created and owned by root (via the install
+# script on Linux, or by the Docker Desktop VM on macOS), so root in
+# the container is the natural owner and can read/write every path it
+# needs without any chown gymnastics.
 #
-# Do NOT add `USER svc` here. The entrypoint must run as root to be able
-# to chown the bind-mounted $DATA_DIR. It drops privileges internally
-# via `gosu svc ...` before exec'ing the CMD.
+# Trivial entrypoint: just exec the CMD.
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
 

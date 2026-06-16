@@ -40,7 +40,16 @@
       "Bash(docker stop *)",
       "Bash(docker rm *)",
       "Bash(rm -rf /tmp/dn-test-data /tmp/dn-test.env)",
-      "Bash(docker rmi *)"
+      "Bash(docker rmi *)",
+      "WebFetch(domain:docs.docker.com)",
+      "WebSearch",
+      "Bash(sh -n /Users/erfan/Projects/dn-deactive-notification/docker-entrypoint.sh)",
+      "Bash(docker compose *)",
+      "Bash(chmod 700 /tmp/dn-test-data/session /tmp/dn-test-data/logs /tmp/dn-test-data/voices)",
+      "Bash(chmod 700 /tmp/dn-test-data)",
+      "Read(//tmp/**)",
+      "Bash(git *)",
+      "Bash(DOCKER_BUILDKIT=1 docker build --no-cache -t dn-notification:test .)"
     ]
   }
 }

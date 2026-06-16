@@ -102,8 +102,8 @@ dnnotification version
    `Digitalweb-ir/dn-notification@main`.
 5. Creates `/opt/dn-notification` and the data tree under
    `/var/lib/dn-notification/{session,logs,voices}`.
-6. Sets `700` on the data directory, `chown 1000:1000` so the container's
-   non-root user can write to the bind-mount.
+6. Sets `755` on the data directory tree so the container's root
+   process can read and write the bind-mount.
 7. Prompts for `TG_API_ID`, `TG_API_HASH`, `TG_PHONE`, `API_KEY` and writes
    `.env` (mode `600`).
 8. Copies itself to `/usr/local/bin/dnnotification` (extension stripped, +x).
@@ -357,7 +357,7 @@ or your own asset bucket, so they're not part of the backup.
 
 ## 11. Security checklist
 
-- [ ] `/var/lib/dn-notification` is `chmod 700` (the install script does this).
+- [ ] `/var/lib/dn-notification` is `chmod 755` (the install script does this).
 - [ ] `.env` is `chmod 600`.
 - [ ] `API_KEY` is a long random string, rotated periodically.
 - [ ] `TG_API_ID` / `TG_API_HASH` / `API_KEY` / `*.session` are **not**
@@ -365,7 +365,6 @@ or your own asset bucket, so they're not part of the backup.
       cover this.
 - [ ] The service runs behind a firewall or private network. The API has
       no per-user model — anyone with `X-API-KEY` can drive the account.
-- [ ] Container runs as UID 1000 (`svc`) inside, not root.
 - [ ] `restart: always` is fine for a personal support bot; if you front
       this with a public reverse proxy, add rate limiting and TLS there.
 
@@ -379,7 +378,7 @@ or your own asset bucket, so they're not part of the backup.
 | `package.json`             | Minimal Node manifest; pins `semantic-release` for CI     |
 | `release.config.cjs`       | semantic-release configuration (plugins, branches, rules) |
 | `write-version.sh`        | Updates `VERSION` and `app/__init__.py` for a new release |
-| `Dockerfile`               | Production image (Python 3.11 slim, non-root, tini, healthcheck, copies VERSION) |
+| `Dockerfile`               | Production image (Python 3.11 slim, runs as root, tini, healthcheck, copies VERSION) |
 | `docker-compose.yaml`      | Single-service compose file (pulls pre-built image)      |
 | `.env.example`             | Documented env template (copy to `.env`)                 |
 | `dnnotification.sh`        | The CLI — install to `/usr/local/bin/dnnotification`     |

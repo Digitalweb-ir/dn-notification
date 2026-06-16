@@ -58,6 +58,7 @@ jobs:
         run: |
           python -c "from app import __version__; print('app version:', __version__)"
 
+
   release:
     name: semantic-release
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
