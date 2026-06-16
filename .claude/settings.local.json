@@ -28,7 +28,19 @@
       "Read(//private/tmp/hook-test/**)",
       "Bash(./version_bump.sh --print)",
       "Bash(git check-ignore *)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(chmod +x /Users/erfan/Projects/dn-deactive-notification/docker-entrypoint.sh)",
+      "Bash(docker build *)",
+      "Bash(rm -rf /tmp/dn-test-data)",
+      "Bash(mkdir -p /tmp/dn-test-data/session /tmp/dn-test-data/logs /tmp/dn-test-data/voices)",
+      "Bash(chmod 755 /tmp/dn-test-data)",
+      "Read(//private/tmp/dn-test-data/**)",
+      "Bash(docker exec *)",
+      "Bash(docker run *)",
+      "Bash(docker stop *)",
+      "Bash(docker rm *)",
+      "Bash(rm -rf /tmp/dn-test-data /tmp/dn-test.env)",
+      "Bash(docker rmi *)"
     ]
   }
 }

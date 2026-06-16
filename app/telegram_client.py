@@ -49,12 +49,18 @@ class TelegramService:
             try:
                 session_dir.mkdir(parents=True, exist_ok=True)
             except PermissionError as exc:
-                # The session dir is bind-mounted from the host. The install
-                # script sets it to mode 700 owned by UID 1000 to match the
-                # in-container service user. If the host-side ownership is
-                # wrong (e.g. dir was created by Docker as root, or an older
-                # install used a different UID), the in-container non-root
-                # process can't traverse it. Surface a clear diagnostic.
+                # The session dir is bind-mounted from the host. The
+                # container's entrypoint (docker-entrypoint.sh) is
+                # supposed to have chowned $DATA_DIR to the in-container
+                # service user (uid 1000) on every start. If we still
+                # see a permission error, the chown likely failed —
+                # most often because the host filesystem is read-only,
+                # the bind-mount was started with an unusual option
+                # (`:ro`, `:uid=...`), or the image is being run
+                # without the entrypoint (e.g. `docker run` with a
+                # custom entrypoint that bypasses the fixup). Surface
+                # a clear diagnostic that points the user at both
+                # the auto-fix and the manual fallback.
                 stat_info = None
                 try:
                     stat_info = session_dir.stat()
@@ -68,7 +74,10 @@ class TelegramService:
                 raise RuntimeError(
                     f"Cannot create session directory {session_dir} ({uid_gid}); "
                     f"the container is running as uid={os.getuid()}. "
-                    f"On the host, run: "
+                    f"This usually means the bind-mounted host directory is not "
+                    f"writable by the in-container service user. The image's "
+                    f"entrypoint (docker-entrypoint.sh) is supposed to fix this on "
+                    f"every start; if the error persists, run on the host: "
                     f"`sudo chown -R 1000:1000 {session_dir} && "
                     f"sudo chmod 700 {session_dir}`. "
                     f"Original error: {exc}"

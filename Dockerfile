@@ -37,6 +37,7 @@ RUN apt-get update \
         curl \
         ca-certificates \
         tini \
+        gosu \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
@@ -61,7 +62,16 @@ RUN mkdir -p /var/lib/dn-notification/session /var/lib/dn-notification/logs /var
 RUN useradd --create-home --shell /usr/sbin/nologin --uid 1000 svc \
     && chown -R svc:svc /app /var/lib/dn-notification
 
-USER svc
+# Entrypoint fixes ownership of $DATA_DIR (the bind-mount target) on every
+# start — host-side ownership can change between deploys and the image's
+# build-time chown does not apply to bind-mounted paths — then drops
+# privileges to svc via gosu and execs the CMD.
+#
+# Do NOT add `USER svc` here. The entrypoint must run as root to be able
+# to chown the bind-mounted $DATA_DIR. It drops privileges internally
+# via `gosu svc ...` before exec'ing the CMD.
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 8000
 
@@ -71,5 +81,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS http://localhost:8000/health || exit 1
 
 # tini reaps zombies and forwards signals so uvicorn shuts down cleanly.
-ENTRYPOINT ["/usr/bin/tini", "--"]
+# The entrypoint sits between tini (PID 1) and the CMD; tini reaps the
+# entrypoint after it `exec`s into the CMD, so signal forwarding works
+# the same as a direct CMD.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

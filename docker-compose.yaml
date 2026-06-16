@@ -5,10 +5,12 @@ services:
     # pulls a fresh copy to guarantee the new release is in use.
     image: digitalneetwork/dn-notification:latest
     restart: always
-    # Run as a non-root user inside the container. UID/GID 1000 matches the
-    # service account created in the Dockerfile. On the host, the bind-mounted
-    # directory below should be owned by the same UID.
-    user: "1000:1000"
+    # The container's entrypoint (docker-entrypoint.sh) fixes ownership
+    # of the bind-mounted DATA_DIR and then drops privileges to the
+    # in-image `svc` user (uid/gid 1000) before exec'ing the CMD. We
+    # therefore do NOT set `user: "1000:1000"` here — doing so would
+    # make the entire process tree non-root, including the entrypoint,
+    # which would prevent the chown from working.
     env_file:
       - .env
     environment:
