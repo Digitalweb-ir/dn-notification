@@ -49,20 +49,22 @@ COPY app ./app
 # CLI's update flow to compare against the latest published version.
 COPY VERSION ./VERSION
 
-# Persistent data lives under /var/lib/dn-notification. The host bind-mounts
-# the same path from the host into the container (see docker-compose.yaml), so:
-#   /var/lib/dn-notification/session   -> Telegram .session file
-#   /var/lib/dn-notification/logs      -> application logs
-#   /var/lib/dn-notification/voices    -> voice templates (.ogg)
-RUN mkdir -p /var/lib/dn-notification/session /var/lib/dn-notification/logs /var/lib/dn-notification/voices
+# Persistent data lives under /var/lib/dn-notification (configurable
+# via DATA_DIR at runtime). The host bind-mounts the same path from
+# the host into the container (see docker-compose.yaml), so the
+# per-purpose subdirs (session, logs, voices) are NOT created here:
+#   * On a fresh install, /var/lib/dn-notification may not exist on
+#     the host yet, and a bind-mount over a non-existent host path
+#     makes Docker create it as root with restrictive perms.
+#   * On an existing install, the host directories may already be
+#     populated and we must not clobber their ownership.
+# docker-entrypoint.sh owns the layout: it creates, chowns, and
+# chmods each subdir at startup, regardless of host state.
 
 # The container runs as root. There is no in-image service user: the
-# bind-mounted $DATA_DIR is created and owned by root (via the install
-# script on Linux, or by the Docker Desktop VM on macOS), so root in
-# the container is the natural owner and can read/write every path it
-# needs without any chown gymnastics.
-#
-# Trivial entrypoint: just exec the CMD.
+# entrypoint ensures every persistent path is owned by root, so root
+# in the container is the natural owner and can read/write every file
+# it needs without any chown gymnastics at request time.
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
 

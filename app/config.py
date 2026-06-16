@@ -58,9 +58,11 @@ class Settings(BaseSettings):
 
     @property
     def voices_path(self) -> Path:
-        p = Path(self.voices_dir)
-        p.mkdir(parents=True, exist_ok=True)
-        return p
+        # The directory is created and owned by docker-entrypoint.sh.
+        # The app only needs the path; if it is missing, something is
+        # wrong with the entrypoint (or the image was started without
+        # it), and the right fix is at deploy time, not at request time.
+        return Path(self.voices_dir)
 
 
 @lru_cache

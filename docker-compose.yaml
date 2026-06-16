@@ -5,11 +5,11 @@ services:
     # pulls a fresh copy to guarantee the new release is in use.
     image: digitalneetwork/dn-notification:latest
     restart: always
-    # The container runs as root. The bind-mounted $DATA_DIR is created
-    # and owned by root on the host (by the install script on Linux, or
-    # by the Docker Desktop VM on macOS), so root in the container is
-    # the natural owner of every file it touches. No `user:` override
-    # is needed.
+    # The container runs as root. docker-entrypoint.sh creates and
+    # chowns the three subdirs under $DATA_DIR (session, logs, voices)
+    # at every startup, so the bind-mount works correctly whether the
+    # host path is fresh, pre-populated, or owned by a different user.
+    # No `user:` override is needed.
     env_file:
       - .env
     environment:

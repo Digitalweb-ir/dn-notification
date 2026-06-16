@@ -42,40 +42,30 @@ class TelegramService:
                 return
 
             logger.info("Initializing Telegram client (session=%s)", self.settings.tg_session_name)
-            # Make sure the session directory exists; Telethon will create
-            # the .session file inside it on first connect.
+            # The session directory is created and owned by
+            # docker-entrypoint.sh, so by the time we get here it must
+            # already exist and be writable. We do a fast sanity check
+            # only — never try to create or chown it from inside the
+            # app: a Python process running as root can do it, but
+            # doing it from the entrypoint means the layout is correct
+            # *before* the app starts, and the operator gets a single,
+            # clear error from the entrypoint logs rather than a stack
+            # trace from the app.
             session_path = self.settings.session_path
             session_dir = session_path.parent
-            try:
-                session_dir.mkdir(parents=True, exist_ok=True)
-            except PermissionError as exc:
-                # The session dir is bind-mounted from the host. The
-                # container runs as root, and the install script creates
-                # the host directory as root with mode 755, so a
-                # PermissionError here means the bind-mount is not what
-                # we expect — for example, the host directory was
-                # created by a different user, or its mode has been
-                # changed by hand. Surface a clear diagnostic and the
-                # host-side fix.
-                stat_info = None
-                try:
-                    stat_info = session_dir.stat()
-                except OSError:
-                    pass
-                uid_gid = (
-                    f"uid={stat_info.st_uid} gid={stat_info.st_gid}"
-                    if stat_info is not None
-                    else "stat failed"
-                )
+            if not session_dir.is_dir():
                 raise RuntimeError(
-                    f"Cannot create session directory {session_dir} ({uid_gid}); "
-                    f"the container is running as uid={os.getuid()}. "
-                    f"This usually means the bind-mounted host directory is not "
-                    f"writable. On the host, run `sudo chmod -R 755 "
-                    f"{session_dir}` (or re-run `dnnotification install` "
-                    f"to recreate the layout with the correct permissions). "
-                    f"Original error: {exc}"
-                ) from exc
+                    f"Session directory {session_dir} is missing. "
+                    f"docker-entrypoint.sh is responsible for creating it; "
+                    f"check the container logs for the [entrypoint] output."
+                )
+            if not os.access(session_dir, os.W_OK):
+                raise RuntimeError(
+                    f"Session directory {session_dir} is not writable by "
+                    f"uid={os.getuid()}. docker-entrypoint.sh should have "
+                    f"chowned it; if you are overriding USER in compose, "
+                    f"remove that override or set it to 0."
+                )
             self.client = TelegramClient(
                 str(session_path),
                 self.settings.tg_api_id,
