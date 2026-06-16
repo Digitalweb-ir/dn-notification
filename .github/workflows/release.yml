@@ -5,6 +5,12 @@ name: Release
 # from CI (per the official semantic-release recommendation: do not
 # install semantic-release as a project dependency).
 #
+# semantic-release@25 requires Node `^22.14.0 || >=24.10.0` (its
+# `engines` field). We pin Node 22 in the runner and let npx fetch
+# the pinned major of semantic-release + the @semantic-release/exec
+# plugin on demand, so the project does not need a package-lock.json
+# and there is nothing in the repo for npm to drift out of sync with.
+#
 # Triggers:
 #   - push to main:    run the full pipeline. semantic-release analyzes
 #                      the commits since the last release tag, picks the
@@ -81,10 +87,9 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-
-      - name: Install semantic-release
-        run: npm ci
+          # semantic-release@25's `engines` field requires
+          # `^22.14.0 || >=24.10.0`. Pin to 22 LTS.
+          node-version: '22'
 
       - name: Configure git for the release commit
         env:
@@ -100,7 +105,11 @@ jobs:
           # Disable npm publish (we have no package to publish; the
           # project is private Python).
           NPM_TOKEN: ""
-        run: npx semantic-release
+        # `npx --package` installs each listed package into npx's
+        # scratch directory and then runs the final command. Pinning
+        # the major of semantic-release and exec avoids breaking the
+        # pipeline when upstream ships a new major.
+        run: npx --package semantic-release@25 --package @semantic-release/exec@6 -- semantic-release
 
   release-dry-run:
     name: semantic-release (dry-run)
@@ -118,17 +127,16 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-
-      - name: Install semantic-release
-        run: npm ci
+          # semantic-release@25's `engines` field requires
+          # `^22.14.0 || >=24.10.0`. Pin to 22 LTS.
+          node-version: '22'
 
       - name: Run semantic-release in dry-run mode
         env:
           # A read-only token is sufficient for dry-run. The default
           # GITHUB_TOKEN has read access, so we use it directly.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx semantic-release --dry-run
+        run: npx --package semantic-release@25 --package @semantic-release/exec@6 -- semantic-release --dry-run
 
   docker:
     name: Build & push Docker image

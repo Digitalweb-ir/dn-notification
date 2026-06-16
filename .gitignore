@@ -38,6 +38,4 @@ logs/
 
 # Node
 node_modules/
-# package-lock.json is committed on purpose: the release workflow runs
-# `npm ci` to install semantic-release, and `npm ci` requires a
-# committed lockfile (lockfileVersion >= 1). Do NOT add it back here.
+package-lock.json
