@@ -13,15 +13,38 @@ name: Release
 #
 # Triggers:
 #   - push to main:    run the full pipeline. semantic-release analyzes
-#                      the commits since the last release tag, picks the
-#                      next version, writes it to VERSION and
-#                      app/__init__.py, creates the release commit + tag
-#                      + GitHub Release, and the downstream `docker` job
-#                      builds and publishes the multi-arch image.
+#                      the commits since the last release tag, picks
+#                      the next version, runs @semantic-release/exec's
+#                      `successCmd` to publish the version to
+#                      $GITHUB_ENV / $GITHUB_OUTPUT, tags the commit,
+#                      creates the GitHub Release, and the downstream
+#                      `docker` job consumes the version via
+#                      `needs.release.outputs.version` and builds +
+#                      publishes the multi-arch image.
 #   - pull_request:    semantic-release runs in --dry-run mode and only
 #                      logs the version that *would* be released. No
 #                      commits, no tags, no Docker push.
 #   - workflow_dispatch:  manual release of the current main HEAD.
+#
+# Version propagation across jobs
+# --------------------------------
+# The `release` job exposes two outputs:
+#   * `released` — "true" if a new release was published, "false"
+#     otherwise. The `docker` job is gated on this so it only runs
+#     when there is actually something to build.
+#   * `version`  — the semver string of the release (e.g. "1.4.2").
+#     The `docker` job reads this and passes it as the
+#     APP_VERSION build-arg and the OCI org.opencontainers.image.version
+#     label.
+#
+# This is the version-propagation pattern recommended by the
+# semantic-release docs and the @semantic-release/exec README:
+# the version is produced by semantic-release and consumed in the
+# same workflow run via job outputs. No `git describe` anywhere,
+# no GitHub API round-trip, no on-disk VERSION file in the repo.
+# If a future maintainer forks the project, this is the only file
+# that needs to know about the image tag — there is no second
+# source of truth to keep in sync.
 
 on:
   push:
@@ -29,6 +52,16 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+
+# Concurrency: never run two release pipelines against main at the
+# same time. semantic-release is not transactional — a tag gets
+# pushed before the GitHub Release is created, so two concurrent
+# runs can race on the same release commit. cancel-in-progress:
+# false because we want a queued run to wait for the in-flight one
+# to finish (rather than be cancelled mid-tag).
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -55,15 +88,30 @@ jobs:
           pip install "uvicorn[standard]==0.30.6"
 
       - name: Import smoke test
+        # Exercises app/__init__.py's __version__ resolution paths
+        # (APP_VERSION env var + git describe fallback). The
+        # APP_VERSION env var is unset here, so the import should
+        # print the git-describe output of the checked-out commit.
         run: |
           python -c "from app import __version__; print('app version:', __version__)"
 
 
   release:
     name: semantic-release
+    # Only run on direct pushes to main. Pull requests use the
+    # separate release-dry-run job, and workflow_dispatch reuses
+    # this one.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-latest
+    # Expose two outputs to downstream jobs:
+    #   - version:  the released semver, e.g. "1.4.2"
+    #   - released: "true" if a release was actually published,
+    #                "false" otherwise (so the docker job can
+    #                skip when there are no qualifying commits).
+    outputs:
+      version:  ${{ steps.publish-version.outputs.version }}
+      released: ${{ steps.publish-version.outputs.released }}
     permissions:
       # semantic-release pushes a release commit and a tag, and creates
       # a GitHub Release. `contents: write` is required for the push;
@@ -101,6 +149,7 @@ jobs:
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
       - name: Run semantic-release
+        id: semantic-release
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           # Disable npm publish (we have no package to publish; the
@@ -108,11 +157,42 @@ jobs:
           NPM_TOKEN: ""
         # `npx --package` installs each listed package into npx's
         # scratch directory and then runs the final command. Pinning
-        # the major of semantic-release avoids breaking the pipeline
-        # when upstream ships a new major. We no longer need
-        # @semantic-release/exec here: the previous setup used it to
-        # invoke write-version.sh, which has been removed.
-        run: npx --package semantic-release@25 -- semantic-release
+        # the major of semantic-release and exec avoids breaking the
+        # pipeline when upstream ships a new major.
+        #
+        # @semantic-release/exec is back in the dependency list (after
+        # we removed it in a previous revision): its `successCmd` is
+        # what publishes RELEASE_VERSION into $GITHUB_ENV, which the
+        # next step propagates to a job output.
+        run: npx --package semantic-release@25 --package @semantic-release/exec@6 -- semantic-release
+
+      - name: Publish the released version to job outputs
+        id: publish-version
+        if: always()
+        # Runs after semantic-release regardless of whether a release
+        # was actually published. If a release was published, the
+        # successCmd step (configured in release.config.cjs) will have
+        # set RELEASE_VERSION in $GITHUB_ENV; we forward it to a job
+        # output here. If no release was published (no qualifying
+        # commits), RELEASE_VERSION is unset, the conditional in the
+        # `if` below keeps `version` empty, and the docker job skips
+        # itself on the `released` flag.
+        env:
+          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
+        run: |
+          if [[ -n "${RELEASE_VERSION:-}" ]]; then
+            {
+              echo "version=${RELEASE_VERSION}"
+              echo "released=true"
+            } >> "$GITHUB_OUTPUT"
+            echo "Published release version: ${RELEASE_VERSION}"
+          else
+            {
+              echo "version="
+              echo "released=false"
+            } >> "$GITHUB_OUTPUT"
+            echo "No release was published (no qualifying commits). The docker job will be skipped."
+          fi
 
   release-dry-run:
     name: semantic-release (dry-run)
@@ -143,11 +223,17 @@ jobs:
 
   docker:
     name: Build & push Docker image
-    # Only run on pushes to main AND only after semantic-release has
-    # finished. The tag semantic-release just cut is the version we
-    # bake into the image as the APP_VERSION build-arg and the
-    # org.opencontainers.image.version OCI label.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Two gates, in order:
+    #   1. Only on direct pushes to main. (PRs go through
+    #      release-dry-run instead.)
+    #   2. Only if the `release` job actually published a new
+    #      release. The `released` output is "false" when
+    #      semantic-release had no qualifying commits, in which
+    #      case there is nothing new to build.
+    if: |
+      github.event_name == 'push'
+      && github.ref == 'refs/heads/main'
+      && needs.release.outputs.released == 'true'
     needs: release
     runs-on: ubuntu-latest
     permissions:
@@ -156,29 +242,10 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v4
         with:
-          # The docker job needs the tag semantic-release just created
-          # to compute the version. fetch-depth: 0 is the simplest way
-          # to guarantee the tag is in the local clone.
-          fetch-depth: 0
-
-      - name: Resolve the release version
-        id: version
-        # The release job cut a tag of the form vX.Y.Z. We need X.Y.Z
-        # for the Dockerfile's APP_VERSION build-arg and the OCI
-        # image.version label. We get it from the most recent tag
-        # reachable from HEAD — semantic-release guarantees that is
-        # the release it just published. A plain semver check on the
-        # stripped tag protects against an unexpected tag shape (e.g.
-        # a maintainer-pushed hotfix tag with a non-semver name).
-        run: |
-          raw=$(git describe --tags --abbrev=0 HEAD)
-          version=${raw#v}
-          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Refusing to build: tag '$raw' is not a valid semver" >&2
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Building digitalneetwork/dn-notification:${version} + :latest"
+          # The docker job does not need the tag in the local clone
+          # — the version comes from needs.release.outputs.version,
+          # not from `git describe`. A shallow clone is fine.
+          fetch-depth: 1
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -196,23 +263,28 @@ jobs:
 
       - name: Extract metadata (tags, labels)
         id: meta
+        env:
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
         uses: docker/metadata-action@v5
         with:
-          # The release version is the only fixed source of truth for
-          # the image tags. The :latest tag is a convenience alias,
-          # but the versioned tag is the one the CLI's update flow
-          # reads to know what is currently installed.
+          # The release version (from semantic-release's job output)
+          # is the only fixed source of truth for the image tags.
+          # The :latest tag is a convenience alias, but the
+          # versioned tag is the one the CLI's update flow reads
+          # to know what is currently installed.
           images: digitalneetwork/dn-notification
           tags: |
-            type=raw,value={{steps.version.outputs.version}}
+            type=raw,value={{env.RELEASE_VERSION}}
             type=raw,value=latest,enable={{is_default_branch}}
           labels: |
-            org.opencontainers.image.version={{steps.version.outputs.version}}
+            org.opencontainers.image.version={{env.RELEASE_VERSION}}
             org.opencontainers.image.title=dn-notification
             org.opencontainers.image.source=https://github.com/Digitalweb-ir/dn-notification
             org.opencontainers.image.licenses=MIT
 
       - name: Build and push
+        env:
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -220,9 +292,11 @@ jobs:
           platforms: linux/amd64,linux/arm64
           # APP_VERSION is read by app/__init__.py at import time.
           # The OCI image.version label is set by metadata-action
-          # above and stamped on the image by buildx.
+          # above and stamped on the image by buildx. Both come
+          # from the same job output of the `release` job, which
+          # received it from semantic-release's successCmd.
           build-args: |
-            VERSION=${{ steps.version.outputs.version }}
+            VERSION=${{ needs.release.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=digitalneetwork/dn-notification:buildcache

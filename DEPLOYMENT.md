@@ -288,13 +288,25 @@ which is the single source of truth for the release version: the git tag
      the change until they pulled, and the next local commit would roll
      the version back to whatever was on disk locally. The tag is the
      only authoritative source.
-3. `docker` — on pushes to `main` after a successful release, resolves
-   the new tag, builds a multi-arch (`linux/amd64`, `linux/arm64`)
-   image with `VERSION=<x.y.z>` as a build-arg, and pushes
-   `digitalneetwork/dn-notification:<version>` and `:latest` to
-   Docker Hub. The same value lands on the
+3. `docker` — on pushes to `main` after a successful release, the
+   `release` job's output (populated by
+   `@semantic-release/exec`'s `successCmd` from `${nextRelease.version}`)
+   feeds the build: `VERSION=<x.y.z>` is passed as a build-arg and
+   the same value lands on the
    `org.opencontainers.image.version` OCI label, which is what
    `dnnotification update` compares against the GitHub Releases API.
+   The version is propagated via job outputs, NOT via
+   `git describe`: the version-propagation pattern recommended by
+   the semantic-release docs avoids the `git describe` failure
+   modes on shallow clones, missing tags, and first releases.
+
+If `semantic-release` finds no qualifying commits on a push to
+`main`, the `release` job exits successfully without publishing
+anything, the `successCmd` does not run, and the `docker` job is
+skipped automatically (it gates on
+`needs.release.outputs.released == 'true'`). This is
+semantic-release's documented skip behavior; no separate gate
+is needed.
 
 Conventional Commit prefixes map to release bumps as follows:
 

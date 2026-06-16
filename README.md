@@ -158,11 +158,19 @@ CI (`.github/workflows/release.yml`) does three things:
    push and PR.
 2. **Release** — on pushes to `main`, runs `npx semantic-release`.
    This analyzes commits since the last tag, picks the next version,
-   creates the `vX.Y.Z` tag, and creates a GitHub Release with
-   auto-generated notes. PRs run the same command in `--dry-run` and
-   only log the would-be version.
+   creates the `vX.Y.Z` tag, creates a GitHub Release with
+   auto-generated notes, and (via the `@semantic-release/exec`
+   plugin's `successCmd` configured in `release.config.cjs`) writes
+   `RELEASE_VERSION=<x.y.z>` to `$GITHUB_ENV`. A follow-up step
+   forwards the value to a job output so the `docker` job can
+   consume it. PRs run the same command in `--dry-run` and only
+   log the would-be version. The `release` job only publishes a
+   version when there are qualifying commits; if there are none,
+   the `docker` job is skipped automatically (it gates on
+   `needs.release.outputs.released == 'true'`).
 3. **Docker** — on pushes to `main` after a successful release,
-   resolves the new tag, builds a multi-arch
+   reads the version from the `release` job's output (NOT from
+   `git describe`), builds a multi-arch
    (`linux/amd64`, `linux/arm64`) image with `VERSION=<x.y.z>` as a
    build-arg, and pushes
    `digitalneetwork/dn-notification:<version>` and `:latest` to
