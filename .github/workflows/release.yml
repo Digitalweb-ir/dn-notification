@@ -151,6 +151,15 @@ jobs:
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
+        with:
+          # `git describe --tags` below needs the vX.Y.Z tag that
+          # semantic-release just pushed to be reachable from the
+          # checkout. The default shallow clone (fetch-depth: 1) does
+          # not fetch tags, so `git describe` fails with "No names
+          # found". `fetch-depth: 0` plus `fetch-tags: true` mirrors
+          # what the release job does and ensures the tag is present.
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
