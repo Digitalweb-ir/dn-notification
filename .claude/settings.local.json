@@ -26,7 +26,8 @@
       "Bash(./version_bump.sh --check)",
       "Bash(echo \"check exit: $?\")",
       "Read(//private/tmp/hook-test/**)",
-      "Bash(./version_bump.sh --print)"
+      "Bash(./version_bump.sh --print)",
+      "Bash(git check-ignore *)"
     ]
   }
 }
