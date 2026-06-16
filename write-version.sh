@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  scripts/write-version.sh — write the new release version
+#  write-version.sh — write the new release version
 # =============================================================================
 #  Invoked by @semantic-release/exec (see release.config.cjs). The version
 #  argument is the semver string semantic-release just computed for the
@@ -14,6 +14,9 @@
 #                               from Python without reading a sibling file
 #                               — useful for tooling and editable installs)
 #
+#  Lives at the repo root so semantic-release's working-directory
+#  invocation (`bash write-version.sh <ver>`) is unambiguous.
+#
 #  The script is idempotent: running it again with the same version leaves
 #  both files unchanged. Running it with no argument prints the current
 #  version and exits 0. Exit code is non-zero only on I/O or argument
@@ -22,8 +25,9 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
+# The script lives at the repo root, so its own directory IS the root.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="${SCRIPT_DIR}"
 
 VERSION_FILE="${REPO_ROOT}/VERSION"
 INIT_FILE="${REPO_ROOT}/app/__init__.py"

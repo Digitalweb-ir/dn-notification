@@ -49,7 +49,7 @@ module.exports = {
                 // before prepare/publish, which is exactly where we want to
                 // write the version files so they are included in the commit
                 // that gets tagged.
-                prepareCmd: 'bash scripts/write-version.sh ${nextRelease.version}',
+                prepareCmd: 'bash write-version.sh ${nextRelease.version}',
             },
         ],
         '@semantic-release/npm',

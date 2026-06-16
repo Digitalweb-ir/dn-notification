@@ -94,7 +94,7 @@ dnnotification.sh         # Deployment CLI (installed to /usr/local/bin/dnnotifi
 VERSION                   # On-disk release version, written by semantic-release
 package.json              # Minimal Node manifest; pins semantic-release for CI
 release.config.cjs        # semantic-release configuration
-scripts/write-version.sh  # Writes VERSION and app/__init__.py for a new release
+write-version.sh          # Writes VERSION and app/__init__.py for a new release
 docker-compose.yaml       # Single-service compose file (uses pre-built image)
 Dockerfile                # Production image (Python 3.11 slim, non-root, tini, healthcheck)
 .env.example              # Documented env template (copy to .env)
@@ -150,15 +150,19 @@ CI (`.github/workflows/release.yml`) does three things:
    push and PR.
 2. **Release** — on pushes to `main`, runs `npx semantic-release`.
    This analyzes commits since the last tag, picks the next version,
-   runs `scripts/write-version.sh` to update `VERSION` and
-   `app/__init__.py`, commits the changes, creates the `vX.Y.Z` tag,
-   and creates a GitHub Release with auto-generated notes. PRs run
-   the same command in `--dry-run` and only log the would-be version.
+   runs `write-version.sh` to update `VERSION` and `app/__init__.py`,
+   commits the changes, creates the `vX.Y.Z` tag, and creates a
+   GitHub Release with auto-generated notes. PRs run the same
+   command in `--dry-run` and only log the would-be version.
 3. **Docker** — on pushes to `main` after a successful release, builds
    and pushes a multi-arch (`linux/amd64`, `linux/arm64`) image to
    `digitalneetwork/dn-notification:<version>` and `:latest`.
 
-Required GitHub Actions secrets: `GH_TOKEN` (with `contents: write`),
+Required GitHub Actions secrets (configured in **Settings → Secrets
+and variables → Actions**, referenced inline via `${{ secrets.X }}`):
+`GH_TOKEN` (PAT or fine-grained token with `contents: write`,
+because semantic-release must push to the protected `main` branch and
+push tags — the auto-provisioned `GITHUB_TOKEN` is not sufficient),
 `DOCKERHUB_USERNAME`, and `DOCKERHUB_TOKEN` (a Docker Hub access token,
 not the account password).
 

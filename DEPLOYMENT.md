@@ -276,8 +276,9 @@ which is the single source of truth for the release version. Every push to
 2. `release` — `npx semantic-release`:
    * Analyzes commits since the last release tag (Conventional Commits).
    * Picks the next semver version.
-   * Runs `scripts/write-version.sh <version>`, which updates the
-     `VERSION` file and the `# Version:` header in `app/__init__.py`.
+   * Runs `write-version.sh <version>` (at the repo root), which
+     updates the `VERSION` file and the `# Version:` header in
+     `app/__init__.py`.
    * Commits those file changes, tags the commit `v<version>`, and
      creates a GitHub Release with auto-generated notes.
 3. `docker` — builds and pushes a multi-arch
@@ -303,23 +304,30 @@ PRs run semantic-release in `--dry-run` mode and only log the version that
 
 ### CI secrets
 
-`release.yml` expects three GitHub Actions secrets:
+Configure these three secrets in the repository's **Settings → Secrets and
+variables → Actions** page. They are referenced inline by `release.yml` via
+`${{ secrets.X }}`; they are never read from `.env` or any file in the
+repository.
 
 | Secret               | Purpose                                                          |
 |----------------------|------------------------------------------------------------------|
-| `GH_TOKEN`           | PAT or fine-grained token with `contents: write`. Pushes the release commit, tag, and GitHub Release. |
+| `GH_TOKEN`           | PAT or fine-grained token with `contents: write` for the target repo. Pushes the release commit, tag, and GitHub Release. semantic-release specifically needs a token that can push to protected branches — the auto-provisioned `GITHUB_TOKEN` is not sufficient. |
 | `DOCKERHUB_USERNAME` | Docker Hub account owning the `digitalneetwork/dn-notification` image. |
 | `DOCKERHUB_TOKEN`    | Docker Hub **access token** (not the account password) with `Read, Write, Delete` scope on the image repository. |
 
+The dry-run job on PRs uses the auto-provisioned `secrets.GITHUB_TOKEN`
+(read-only is enough for a dry run); the release job uses the custom
+`secrets.GH_TOKEN` (write access required for the push).
+
 The `dnnotification.sh update` command reads the public GitHub Releases API
-unauthenticated; it picks up `$GITHUB_TOKEN` from the environment if you
-need higher rate limits.
+unauthenticated; it picks up `$GITHUB_TOKEN` from the operator's shell
+environment if higher rate limits are needed.
 
 ### Where the version lives in the code
 
 * The `VERSION` file at the repo root is the on-disk source of truth.
-  It is written by `scripts/write-version.sh` on every release and
-  baked into the Docker image by the `Dockerfile`'s `COPY VERSION ./VERSION`.
+  It is written by `write-version.sh` on every release and baked into
+  the Docker image by the `Dockerfile`'s `COPY VERSION ./VERSION`.
 * `app/__init__.py` reads `VERSION` at import time and exposes it as
   `__version__`. `app/main.py` uses that constant for the FastAPI
   app's `version=` field.
@@ -370,7 +378,7 @@ or your own asset bucket, so they're not part of the backup.
 | `VERSION`                  | On-disk release semver; written by semantic-release on every release |
 | `package.json`             | Minimal Node manifest; pins `semantic-release` for CI     |
 | `release.config.cjs`       | semantic-release configuration (plugins, branches, rules) |
-| `scripts/write-version.sh` | Updates `VERSION` and `app/__init__.py` for a new release |
+| `write-version.sh`        | Updates `VERSION` and `app/__init__.py` for a new release |
 | `Dockerfile`               | Production image (Python 3.11 slim, non-root, tini, healthcheck, copies VERSION) |
 | `docker-compose.yaml`      | Single-service compose file (pulls pre-built image)      |
 | `.env.example`             | Documented env template (copy to `.env`)                 |
