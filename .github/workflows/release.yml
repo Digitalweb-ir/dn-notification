@@ -152,14 +152,11 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v4
         with:
-          # `git describe --tags` below needs the vX.Y.Z tag that
-          # semantic-release just pushed to be reachable from the
-          # checkout. The default shallow clone (fetch-depth: 1) does
-          # not fetch tags, so `git describe` fails with "No names
-          # found". `fetch-depth: 0` plus `fetch-tags: true` mirrors
-          # what the release job does and ensures the tag is present.
-          fetch-depth: 0
-          fetch-tags: true
+          # The docker job reads the version from ./VERSION, not from
+          # `git describe`, so a shallow clone is enough. We still pin
+          # to a fixed commit (no ref:) and rely on the default
+          # fetch-depth: 1.
+          fetch-depth: 1
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -175,13 +172,21 @@ jobs:
           # Docker Hub's recommended credential type for CI.
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Read the version from the latest release tag
+      - name: Read the version from the VERSION file
         id: meta
         run: |
-          # semantic-release has already pushed the vX.Y.Z tag by the
-          # time this job runs. The version-without-v is the image tag.
-          tag=$(git describe --tags --abbrev=0)
-          version=${tag#v}
+          # The release job ran write-version.sh (via @semantic-release/exec)
+          # before this docker job started, so ./VERSION at the tip of main
+          # already holds the version that semantic-release just released.
+          # Reading the file directly is the right source of truth here:
+          #   * It avoids the `git describe --tags` failure mode that
+          #     happens whenever the v* tag is not present on the
+          #     remote yet (which is common on the very first release,
+          #     and any time a tag push is delayed or skipped).
+          #   * It matches the same value that the Dockerfile bakes
+          #     into the image, so the tag we push and the version
+          #     inside the image can never drift.
+          version=$(tr -d '[:space:]' < VERSION)
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "image=digitalneetwork/dn-notification" >> "$GITHUB_OUTPUT"
           echo "Building digitalneetwork/dn-notification:${version} + :latest"

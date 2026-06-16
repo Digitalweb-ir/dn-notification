@@ -27,7 +27,8 @@
       "Bash(echo \"check exit: $?\")",
       "Read(//private/tmp/hook-test/**)",
       "Bash(./version_bump.sh --print)",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "WebFetch(domain:github.com)"
     ]
   }
 }
