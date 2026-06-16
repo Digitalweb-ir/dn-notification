@@ -237,7 +237,10 @@ The `update` flow is deterministic and safe to re-run:
 
 1. **Read installed version** — `docker exec dn-notification cat /app/VERSION`
    gives the version that is *actually* running, never a guess from the host.
-2. **Read latest VERSION** from `Digitalweb-ir/dn-notification@main`.
+2. **Read latest release** from the GitHub Releases API
+   (`https://api.github.com/repos/Digitalweb-ir/dn-notification/releases/latest`).
+   The `tag_name` field returns `vX.Y.Z`; the leading `v` is stripped before
+   comparison.
 3. **Compare**:
    * Equal → print `You already have the latest version: <version>` and exit.
    * Newer → print `A new version is available: <version>` and prompt
@@ -265,37 +268,61 @@ fetch a fresh copy even if the registry tag wasn't repushed.
 
 ## 9. Versioning & release flow
 
-The repository root has a single `VERSION` file (semver, e.g. `1.4.2`) that is
-the canonical release version. `app/__init__.py`'s `__version__` is kept in
-lockstep automatically.
+The project is versioned and released by [semantic-release](https://github.com/semantic-release/semantic-release),
+which is the single source of truth for the release version. Every push to
+`main` triggers `.github/workflows/release.yml`, which runs:
 
-Commit messages drive the bump (highest-priority keyword wins):
+1. `test` — installs Python deps and smoke-imports the app.
+2. `release` — `npx semantic-release`:
+   * Analyzes commits since the last release tag (Conventional Commits).
+   * Picks the next semver version.
+   * Runs `scripts/write-version.sh <version>`, which updates the
+     `VERSION` file and the `# Version:` header in `app/__init__.py`.
+   * Commits those file changes, tags the commit `v<version>`, and
+     creates a GitHub Release with auto-generated notes.
+3. `docker` — builds and pushes a multi-arch
+   (`linux/amd64`, `linux/arm64`) image to
+   `digitalneetwork/dn-notification:<version>` and `:latest`.
 
-| Commit prefix  | Bump   | Example result |
-|----------------|--------|----------------|
-| `break: …`     | major  | `1.2.3 -> 2.0.0` |
-| `feat: …`      | minor  | `1.2.3 -> 1.3.0` |
-| `fix: …`       | patch  | `1.2.3 -> 1.2.4` |
-| (none)         | —      | version unchanged |
+Conventional Commit prefixes map to release bumps as follows:
 
-`version_bump.sh` implements this:
+| Commit prefix / marker           | Bump   | Example result       |
+|----------------------------------|--------|----------------------|
+| `BREAKING CHANGE:` (body / footer) | major  | `1.2.3 -> 2.0.0`    |
+| `break: …` (legacy alias)        | major  | `1.2.3 -> 2.0.0`     |
+| `feat: …` / `feat!: …`           | minor  | `1.2.3 -> 1.3.0`     |
+| `fix: …`                         | patch  | `1.2.3 -> 1.2.4`     |
+| (no qualifying commit)           | —      | version unchanged    |
 
-```bash
-./version_bump.sh              # bump in place
-./version_bump.sh --print      # print the bump that would be applied
-./version_bump.sh --since TAG  # override the diff range
-```
+The `break:` prefix is a project-specific alias preserved for backward
+compatibility with the previous hand-rolled release system; the standard
+Conventional Commits marker is `BREAKING CHANGE:` in the commit body.
 
-It is invoked by `.github/workflows/bump-version.yml` on every push to `main`:
+PRs run semantic-release in `--dry-run` mode and only log the version that
+*would* be released. They do not commit, tag, or publish anything.
 
-```yaml
-- run: ./version_bump.sh
-- run: git add VERSION app/__init__.py && git commit -m "chore(release): bump to $(cat VERSION)"
-```
+### CI secrets
 
-If no qualifying commit is found since the last version tag, the version is
-left unchanged and the script exits 0. The image is built with the new
-`VERSION` baked into `/app/VERSION` (see `Dockerfile`'s `COPY VERSION ./VERSION`).
+`release.yml` expects three GitHub Actions secrets:
+
+| Secret               | Purpose                                                          |
+|----------------------|------------------------------------------------------------------|
+| `GH_TOKEN`           | PAT or fine-grained token with `contents: write`. Pushes the release commit, tag, and GitHub Release. |
+| `DOCKERHUB_USERNAME` | Docker Hub account owning the `digitalneetwork/dn-notification` image. |
+| `DOCKERHUB_TOKEN`    | Docker Hub **access token** (not the account password) with `Read, Write, Delete` scope on the image repository. |
+
+The `dnnotification.sh update` command reads the public GitHub Releases API
+unauthenticated; it picks up `$GITHUB_TOKEN` from the environment if you
+need higher rate limits.
+
+### Where the version lives in the code
+
+* The `VERSION` file at the repo root is the on-disk source of truth.
+  It is written by `scripts/write-version.sh` on every release and
+  baked into the Docker image by the `Dockerfile`'s `COPY VERSION ./VERSION`.
+* `app/__init__.py` reads `VERSION` at import time and exposes it as
+  `__version__`. `app/main.py` uses that constant for the FastAPI
+  app's `version=` field.
 
 ---
 
@@ -340,13 +367,15 @@ or your own asset bucket, so they're not part of the backup.
 
 | File                       | What it is                                                |
 |----------------------------|-----------------------------------------------------------|
-| `VERSION`                  | Single source of truth for the release semver            |
-| `version_bump.sh`          | Bumps VERSION based on commit-message keywords           |
+| `VERSION`                  | On-disk release semver; written by semantic-release on every release |
+| `package.json`             | Minimal Node manifest; pins `semantic-release` for CI     |
+| `release.config.cjs`       | semantic-release configuration (plugins, branches, rules) |
+| `scripts/write-version.sh` | Updates `VERSION` and `app/__init__.py` for a new release |
 | `Dockerfile`               | Production image (Python 3.11 slim, non-root, tini, healthcheck, copies VERSION) |
 | `docker-compose.yaml`      | Single-service compose file (pulls pre-built image)      |
 | `.env.example`             | Documented env template (copy to `.env`)                 |
 | `dnnotification.sh`        | The CLI — install to `/usr/local/bin/dnnotification`     |
-| `.github/workflows/`       | CI: bumps VERSION on push to `main`                      |
+| `.github/workflows/`       | CI: semantic-release + Docker image publish on `main`     |
 
 See `../README.md` for application-level docs (API endpoints, n8n usage,
 tuning knobs).

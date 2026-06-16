@@ -6,6 +6,7 @@ from typing import AsyncIterator
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
+from . import __version__
 from .config import get_settings
 from .logger import get_logger, setup_logging
 from .models import (
@@ -79,7 +80,7 @@ app = FastAPI(
         "Personal-account Telegram automation (MTProto/Telethon) for support workflows. "
         "Searches private dialogs and sends voice notes."
     ),
-    version="1.0.0",
+    version=__version__,
     lifespan=lifespan,
 )
 

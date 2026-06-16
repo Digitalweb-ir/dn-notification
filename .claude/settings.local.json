@@ -19,7 +19,14 @@
       "Bash(./dnnotification.sh bogus-cmd *)",
       "Bash(./dnnotification.sh install *)",
       "Bash(bash *)",
-      "Bash(chmod +x /Users/erfan/Projects/dn-deactive-notification/version_bump.sh)"
+      "Bash(chmod +x /Users/erfan/Projects/dn-deactive-notification/version_bump.sh)",
+      "Bash(sed -i.bak -E 's|^__version__ *= *\"[^\"]*\"|__version__ = \"1.3.0\"|' app/__init__.py)",
+      "Bash(rm -f app/__init__.py.bak)",
+      "Bash(git add *)",
+      "Bash(./version_bump.sh --check)",
+      "Bash(echo \"check exit: $?\")",
+      "Read(//private/tmp/hook-test/**)",
+      "Bash(./version_bump.sh --print)"
     ]
   }
 }

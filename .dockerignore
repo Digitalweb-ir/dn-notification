@@ -14,3 +14,9 @@ venv
 .idea
 .vscode
 .claude
+# Node / semantic-release tooling — never needed in the production image.
+node_modules
+package-lock.json
+release.config.cjs
+scripts/
+.github/

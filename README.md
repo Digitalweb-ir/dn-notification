@@ -81,7 +81,7 @@ The `update` flow:
 
 ```
 app/
-├── __init__.py           # __version__ (kept in sync with ../VERSION)
+├── __init__.py           # __version__ (loaded from ../VERSION at import time)
 ├── main.py               # FastAPI app, lifespan, routes, auth
 ├── config.py             # Pydantic settings (loads .env, derives sub-paths from DATA_DIR)
 ├── logger.py             # Structured logging setup
@@ -91,12 +91,14 @@ app/
 └── voice_service.py      # Voice file mapping + send_file
 
 dnnotification.sh         # Deployment CLI (installed to /usr/local/bin/dnnotification)
-version_bump.sh           # Bumps VERSION based on commit-message keywords
-VERSION                   # Single source of truth for the release version
+VERSION                   # On-disk release version, written by semantic-release
+package.json              # Minimal Node manifest; pins semantic-release for CI
+release.config.cjs        # semantic-release configuration
+scripts/write-version.sh  # Writes VERSION and app/__init__.py for a new release
 docker-compose.yaml       # Single-service compose file (uses pre-built image)
 Dockerfile                # Production image (Python 3.11 slim, non-root, tini, healthcheck)
 .env.example              # Documented env template (copy to .env)
-.github/workflows/        # CI: version_bump on push to main
+.github/workflows/        # CI: semantic-release + Docker image publish on main
 ```
 
 ### Simplified configuration
@@ -120,54 +122,45 @@ inside the container and on the host stay aligned without any extra wiring.
 
 ### Versioning
 
-The release is pinned by a **git tag** (`vX.Y.Z`) — the tag is the canonical
-release marker. `VERSION` and `app/__init__.py` are *derived* from the tag
-plus the commits since it, kept in lockstep by `version_bump.sh`. The
-running container reports its real release because the same `VERSION` file
-is baked into the Docker image (copied to `/app/VERSION`).
+The project is versioned and released by [semantic-release](https://github.com/semantic-release/semantic-release).
+The git tag (`vX.Y.Z`) plus a GitHub Release entry are the canonical
+release marker. `VERSION` and `app/__init__.py` are *derived* from that
+release: `scripts/write-version.sh` writes the version into the `VERSION`
+file and the `# Version:` header in `app/__init__.py`, and the running
+container reports its real release because the same `VERSION` file is
+baked into the Docker image (copied to `/app/VERSION`).
 
-`version_bump.sh` reads commit messages since the last version tag and bumps
-accordingly:
+Conventional Commits drive the bump:
 
-| Commit prefix | Bump  | Example result    |
-| ------------- | ----- | ----------------- |
-| `break: …`    | major | `1.2.3 -> 2.0.0`  |
-| `feat: …`     | minor | `1.2.3 -> 1.3.0`  |
-| `fix: …`      | patch | `1.2.3 -> 1.2.4`  |
-| (other)       | —     | version unchanged |
+| Commit prefix / marker                | Bump  | Example result    |
+| ------------------------------------- | ----- | ----------------- |
+| `BREAKING CHANGE:` (body / footer)    | major | `1.2.3 -> 2.0.0`  |
+| `break: …` (legacy alias)             | major | `1.2.3 -> 2.0.0`  |
+| `feat: …` / `feat!: …`                | minor | `1.2.3 -> 1.3.0`  |
+| `fix: …`                              | patch | `1.2.3 -> 1.2.4`  |
+| (other)                               | —     | version unchanged |
 
-**The bump is applied locally, in the same commit as the change that
-caused it.** A `commit-msg` hook at `.githooks/commit-msg` updates VERSION
-and `__init__.py` automatically when the commit subject starts with one of
-the recognised prefixes. The bump and the change land in one commit, so
-local and remote never diverge.
+The `break:` prefix is a project-specific alias preserved for backward
+compatibility with the previous hand-rolled release system; the standard
+Conventional Commits marker is `BREAKING CHANGE:` in the commit body.
 
-To enable the hooks in a fresh clone:
+CI (`.github/workflows/release.yml`) does three things:
 
-```bash
-make install-hooks
-```
+1. **Test** — installs Python deps and smoke-imports the app on every
+   push and PR.
+2. **Release** — on pushes to `main`, runs `npx semantic-release`.
+   This analyzes commits since the last tag, picks the next version,
+   runs `scripts/write-version.sh` to update `VERSION` and
+   `app/__init__.py`, commits the changes, creates the `vX.Y.Z` tag,
+   and creates a GitHub Release with auto-generated notes. PRs run
+   the same command in `--dry-run` and only log the would-be version.
+3. **Docker** — on pushes to `main` after a successful release, builds
+   and pushes a multi-arch (`linux/amd64`, `linux/arm64`) image to
+   `digitalneetwork/dn-notification:<version>` and `:latest`.
 
-That installs the `commit-msg` and `pre-push` hooks from `.githooks/`
-into your local `.git/hooks/` and verifies VERSION is in sync. Verify
-with `make check-hooks`. The previous `git config core.hooksPath
-.githooks` form still works if you prefer it, but the Makefile is the
-documented path.
-
-To skip the auto-bump for a one-off commit (e.g. `chore:`, `docs:`), set
-`SKIP_VERSION_BUMP=1` in the environment, or use a prefix that isn't in
-the table above.
-
-CI (`.github/workflows/bump-version.yml`) does two things:
-
-1. On every push to `main`, runs `./version_bump.sh --check`. If VERSION
-   doesn't match the implied bump from the commits, the build fails. This
-   catches the case where someone bypassed the hook (e.g. by amending a
-   commit message).
-2. On `v*.*.*` tag pushes, builds and publishes the Docker image with the
-   tag as the image tag. Tags are created locally with
-   `git tag vX.Y.Z && git push --tags` — they never appear from a CI
-   auto-commit.
+Required GitHub Actions secrets: `GH_TOKEN` (with `contents: write`),
+`DOCKERHUB_USERNAME`, and `DOCKERHUB_TOKEN` (a Docker Hub access token,
+not the account password).
 
 
 ---

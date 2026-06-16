@@ -4,8 +4,15 @@
 # =============================================================================
 #  Manages the dockerized DN Notification (Telegram MTProto automation) service.
 #
-#  Source repo (used to fetch docker-compose.yaml / .env.example / VERSION):
+#  Source repo (used to fetch docker-compose.yaml / .env.example):
 #      https://github.com/Digitalweb-ir/dn-notification  (branch: main)
+#
+#  Version discovery:
+#      The project version is owned by semantic-release. Each release is a
+#      git tag vX.Y.Z plus a GitHub Release entry. The `update` command
+#      queries the GitHub Releases API (unauthenticated, public) to find
+#      the latest published version, then compares it to the version
+#      baked into the running container's /app/VERSION file.
 #
 #  Docker image:
 #      digitalneetwork/dn-notification:latest
@@ -32,6 +39,11 @@ IFS=$'\n\t'
 readonly GIT_REPO="https://github.com/Digitalweb-ir/dn-notification"
 readonly GIT_BRANCH="main"
 readonly RAW_BASE="https://raw.githubusercontent.com/Digitalweb-ir/dn-notification/${GIT_BRANCH}"
+# Public GitHub REST API. Unauthenticated requests are rate-limited to
+# 60/hour, which is fine for an interactive CLI. If the project ever
+# needs higher throughput, drop a fine-grained PAT into the GITHUB_TOKEN
+# env var and the request will pick it up automatically.
+readonly RELEASES_API="https://api.github.com/repos/Digitalweb-ir/dn-notification/releases/latest"
 readonly DOCKER_IMAGE="digitalneetwork/dn-notification:latest"
 readonly CONTAINER_VERSION_FILE="/app/VERSION"  # baked into the image (Dockerfile)
 
@@ -329,6 +341,9 @@ download_deployment_files() {
     fetch_from_repo "docker-compose.yaml" "$COMPOSE_FILE"
     fetch_from_repo ".env.example"        "$ENV_EXAMPLE"
     as_root chmod 644 "$COMPOSE_FILE" "$ENV_EXAMPLE"
+    # VERSION is NOT fetched here — it is no longer authoritative at
+    # runtime. The release version lives in the git tag, and the
+    # cmd_update() flow discovers it via the GitHub Releases API.
 }
 
 # -----------------------------------------------------------------------------
@@ -564,10 +579,44 @@ cmd_update() {
     fi
     log_info "Installed version (from container): $installed"
 
-    # Step 2: read the latest VERSION from the GitHub repo.
-    local latest
-    latest=$(curl -fsSL "${RAW_BASE}/VERSION" | tr -d '[:space:]') \
-        || die "Failed to fetch latest VERSION from $RAW_BASE/VERSION."
+    # Step 2: read the latest release tag from the GitHub Releases API.
+    # The API returns the latest non-draft, non-prerelease release; for
+    # the dn-notification project every release is a stable one. The
+    # response is JSON; tag_name is "vX.Y.Z" so we strip the leading v
+    # to compare against the container's plain X.Y.Z value.
+    local latest_tag latest api_headers
+    have_curl || die "curl is required to query the GitHub Releases API."
+
+    # Use a writable header file so curl can write the headers to disk
+    # (-D -) and we can inspect rate-limit / auth state if needed.
+    api_headers=$(mktemp)
+    # shellcheck disable=SC2064  # we want $api_headers captured NOW, not at trap time.
+    trap "rm -f '$api_headers'" RETURN
+
+    local gh_auth=()
+    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        gh_auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+    fi
+
+    if ! latest_tag=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -D "$api_headers" \
+            "${gh_auth[@]}" \
+            "$RELEASES_API"); then
+        die "Failed to fetch latest release from $RELEASES_API."
+    fi
+
+    # Extract tag_name from JSON without a jq dependency. The response
+    # always has `"tag_name":"<value>"`; we grab the first occurrence
+    # and strip the surrounding quotes.
+    local latest_raw
+    latest_raw=$(printf '%s' "$latest_tag" \
+        | sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -n1)
+    if [[ -z "$latest_raw" ]]; then
+        die "GitHub Releases API response did not contain a tag_name field."
+    fi
+    latest=${latest_raw#v}
     log_info "Latest version (from $GIT_REPO): $latest"
 
     # Step 3: compare.
@@ -770,7 +819,7 @@ Commands:
   down           docker compose down
   restart        docker compose restart
   logs           docker compose logs -f
-  update         Check installed version, merge .env, redeploy with new image
+  update         Check installed version (via GitHub Releases API), merge .env, redeploy with new image
   edit           Open docker-compose.yaml in an editor
   edit-env       Open .env in an editor
   version        Print installed version (read from the running container)
