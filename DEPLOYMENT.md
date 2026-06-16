@@ -207,7 +207,7 @@ Reports:
 - Project, data, voices paths
 - `.env` presence
 - Image, container state, started-at, healthcheck, published port
-- **Installed version** (read from the container via `docker exec`)
+- **Installed version** (read from the local image's OCI label via `docker image inspect`, no need for the container to be running)
 - HTTP probe of `GET /health`
 
 Use it from cron or a monitoring script — exit code is 0 unless docker itself
@@ -215,9 +215,9 @@ is missing.
 
 ### `version`
 
-Prints the running container's version (read from `/app/VERSION` inside the
-container). Falls back to the CLI's own version when the container is not
-running.
+Prints the installed image's version (read from the
+`org.opencontainers.image.version` OCI label via `docker image inspect`).
+Falls back to the CLI's own version when no image is installed locally.
 
 ### `edit` / `edit-env`
 
@@ -235,8 +235,11 @@ sudo dnnotification update
 
 The `update` flow is deterministic and safe to re-run:
 
-1. **Read installed version** — `docker exec dn-notification cat /app/VERSION`
-   gives the version that is *actually* running, never a guess from the host.
+1. **Read installed version** — `docker image inspect --format ... org.opencontainers.image.version`
+   gives the version that is *actually* installed locally, without
+   requiring the container to be running. The label is stamped on the
+   image at build time from the same git tag the GitHub Releases API
+   returns, so the two can never drift.
 2. **Read latest release** from the GitHub Releases API
    (`https://api.github.com/repos/Digitalweb-ir/dn-notification/releases/latest`).
    The `tag_name` field returns `vX.Y.Z`; the leading `v` is stripped before
@@ -269,21 +272,29 @@ fetch a fresh copy even if the registry tag wasn't repushed.
 ## 9. Versioning & release flow
 
 The project is versioned and released by [semantic-release](https://github.com/semantic-release/semantic-release),
-which is the single source of truth for the release version. Every push to
-`main` triggers `.github/workflows/release.yml`, which runs:
+which is the single source of truth for the release version: the git tag
+(`vX.Y.Z`) is the version. Every push to `main` triggers
+`.github/workflows/release.yml`, which runs:
 
 1. `test` — installs Python deps and smoke-imports the app.
 2. `release` — `npx semantic-release`:
    * Analyzes commits since the last release tag (Conventional Commits).
    * Picks the next semver version.
-   * Runs `write-version.sh <version>` (at the repo root), which
-     updates the `VERSION` file and the `# Version:` header in
-     `app/__init__.py`.
-   * Commits those file changes, tags the commit `v<version>`, and
-     creates a GitHub Release with auto-generated notes.
-3. `docker` — builds and pushes a multi-arch
-   (`linux/amd64`, `linux/arm64`) image to
-   `digitalneetwork/dn-notification:<version>` and `:latest`.
+   * Tags the commit `v<version>` and creates a GitHub Release with
+     auto-generated notes.
+   * No repo files are mutated by the release — the previous flow wrote
+     `VERSION` and a `__init__.py` header, but that created a
+     stale-cache problem: a developer's local checkout would not see
+     the change until they pulled, and the next local commit would roll
+     the version back to whatever was on disk locally. The tag is the
+     only authoritative source.
+3. `docker` — on pushes to `main` after a successful release, resolves
+   the new tag, builds a multi-arch (`linux/amd64`, `linux/arm64`)
+   image with `VERSION=<x.y.z>` as a build-arg, and pushes
+   `digitalneetwork/dn-notification:<version>` and `:latest` to
+   Docker Hub. The same value lands on the
+   `org.opencontainers.image.version` OCI label, which is what
+   `dnnotification update` compares against the GitHub Releases API.
 
 Conventional Commit prefixes map to release bumps as follows:
 
@@ -325,12 +336,19 @@ environment if higher rate limits are needed.
 
 ### Where the version lives in the code
 
-* The `VERSION` file at the repo root is the on-disk source of truth.
-  It is written by `write-version.sh` on every release and baked into
-  the Docker image by the `Dockerfile`'s `COPY VERSION ./VERSION`.
-* `app/__init__.py` reads `VERSION` at import time and exposes it as
-  `__version__`. `app/main.py` uses that constant for the FastAPI
-  app's `version=` field.
+* The git tag `vX.Y.Z` is the single source of truth for the version.
+* The release workflow passes the tag into the Dockerfile as a
+  `VERSION` build-arg. The Dockerfile bakes it into the image in two
+  places: the `APP_VERSION` env var and the
+  `org.opencontainers.image.version` OCI label.
+* `app/__init__.py` resolves `__version__` at import time, preferring
+  `APP_VERSION` and falling back to `git describe --tags --dirty` (for
+  editable/dev installs) and then `0.0.0+unknown`. `app/main.py` uses
+  that constant for the FastAPI app's `version=` field.
+* `dnnotification update` reads the installed version from the OCI
+  label with `docker image inspect` and the latest version from the
+  GitHub Releases API, so the two endpoints of the comparison share
+  the same source (the git tag) and can never disagree.
 
 ---
 
@@ -374,11 +392,9 @@ or your own asset bucket, so they're not part of the backup.
 
 | File                       | What it is                                                |
 |----------------------------|-----------------------------------------------------------|
-| `VERSION`                  | On-disk release semver; written by semantic-release on every release |
 | `package.json`             | Minimal Node manifest; pins `semantic-release` for CI     |
 | `release.config.cjs`       | semantic-release configuration (plugins, branches, rules) |
-| `write-version.sh`        | Updates `VERSION` and `app/__init__.py` for a new release |
-| `Dockerfile`               | Production image (Python 3.11 slim, runs as root, tini, healthcheck, copies VERSION) |
+| `Dockerfile`               | Production image (Python 3.11 slim, runs as root, tini, healthcheck); takes VERSION as build-arg, stamps OCI labels |
 | `docker-compose.yaml`      | Single-service compose file (pulls pre-built image)      |
 | `.env.example`             | Documented env template (copy to `.env`)                 |
 | `dnnotification.sh`        | The CLI — install to `/usr/local/bin/dnnotification`     |

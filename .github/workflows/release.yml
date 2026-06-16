@@ -108,9 +108,11 @@ jobs:
           NPM_TOKEN: ""
         # `npx --package` installs each listed package into npx's
         # scratch directory and then runs the final command. Pinning
-        # the major of semantic-release and exec avoids breaking the
-        # pipeline when upstream ships a new major.
-        run: npx --package semantic-release@25 --package @semantic-release/exec@6 -- semantic-release
+        # the major of semantic-release avoids breaking the pipeline
+        # when upstream ships a new major. We no longer need
+        # @semantic-release/exec here: the previous setup used it to
+        # invoke write-version.sh, which has been removed.
+        run: npx --package semantic-release@25 -- semantic-release
 
   release-dry-run:
     name: semantic-release (dry-run)
@@ -137,13 +139,14 @@ jobs:
           # A read-only token is sufficient for dry-run. The default
           # GITHUB_TOKEN has read access, so we use it directly.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx --package semantic-release@25 --package @semantic-release/exec@6 -- semantic-release --dry-run
+        run: npx --package semantic-release@25 -- semantic-release --dry-run
 
   docker:
     name: Build & push Docker image
     # Only run on pushes to main AND only after semantic-release has
-    # finished. The tag published by semantic-release is the version
-    # we tag the image with.
+    # finished. The tag semantic-release just cut is the version we
+    # bake into the image as the APP_VERSION build-arg and the
+    # org.opencontainers.image.version OCI label.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: release
     runs-on: ubuntu-latest
@@ -153,11 +156,29 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v4
         with:
-          # The docker job reads the version from ./VERSION, not from
-          # `git describe`, so a shallow clone is enough. We still pin
-          # to a fixed commit (no ref:) and rely on the default
-          # fetch-depth: 1.
-          fetch-depth: 1
+          # The docker job needs the tag semantic-release just created
+          # to compute the version. fetch-depth: 0 is the simplest way
+          # to guarantee the tag is in the local clone.
+          fetch-depth: 0
+
+      - name: Resolve the release version
+        id: version
+        # The release job cut a tag of the form vX.Y.Z. We need X.Y.Z
+        # for the Dockerfile's APP_VERSION build-arg and the OCI
+        # image.version label. We get it from the most recent tag
+        # reachable from HEAD — semantic-release guarantees that is
+        # the release it just published. A plain semver check on the
+        # stripped tag protects against an unexpected tag shape (e.g.
+        # a maintainer-pushed hotfix tag with a non-semver name).
+        run: |
+          raw=$(git describe --tags --abbrev=0 HEAD)
+          version=${raw#v}
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Refusing to build: tag '$raw' is not a valid semver" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building digitalneetwork/dn-notification:${version} + :latest"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -173,24 +194,23 @@ jobs:
           # Docker Hub's recommended credential type for CI.
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Read the version from the VERSION file
+      - name: Extract metadata (tags, labels)
         id: meta
-        run: |
-          # The release job ran write-version.sh (via @semantic-release/exec)
-          # before this docker job started, so ./VERSION at the tip of main
-          # already holds the version that semantic-release just released.
-          # Reading the file directly is the right source of truth here:
-          #   * It avoids the `git describe --tags` failure mode that
-          #     happens whenever the v* tag is not present on the
-          #     remote yet (which is common on the very first release,
-          #     and any time a tag push is delayed or skipped).
-          #   * It matches the same value that the Dockerfile bakes
-          #     into the image, so the tag we push and the version
-          #     inside the image can never drift.
-          version=$(tr -d '[:space:]' < VERSION)
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "image=digitalneetwork/dn-notification" >> "$GITHUB_OUTPUT"
-          echo "Building digitalneetwork/dn-notification:${version} + :latest"
+        uses: docker/metadata-action@v5
+        with:
+          # The release version is the only fixed source of truth for
+          # the image tags. The :latest tag is a convenience alias,
+          # but the versioned tag is the one the CLI's update flow
+          # reads to know what is currently installed.
+          images: digitalneetwork/dn-notification
+          tags: |
+            type=raw,value={{steps.version.outputs.version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.version={{steps.version.outputs.version}}
+            org.opencontainers.image.title=dn-notification
+            org.opencontainers.image.source=https://github.com/Digitalweb-ir/dn-notification
+            org.opencontainers.image.licenses=MIT
 
       - name: Build and push
         uses: docker/build-push-action@v5
@@ -198,8 +218,12 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: |
-            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
-            ${{ steps.meta.outputs.image }}:latest
+          # APP_VERSION is read by app/__init__.py at import time.
+          # The OCI image.version label is set by metadata-action
+          # above and stamped on the image by buildx.
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=digitalneetwork/dn-notification:buildcache
           cache-to:   type=registry,ref=digitalneetwork/dn-notification:buildcache,mode=max

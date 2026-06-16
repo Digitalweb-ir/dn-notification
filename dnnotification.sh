@@ -12,7 +12,8 @@
 #      git tag vX.Y.Z plus a GitHub Release entry. The `update` command
 #      queries the GitHub Releases API (unauthenticated, public) to find
 #      the latest published version, then compares it to the version
-#      baked into the running container's /app/VERSION file.
+#      baked into the local image's org.opencontainers.image.version
+#      OCI label (set at build time from the same git tag).
 #
 #  Docker image:
 #      digitalneetwork/dn-notification:latest
@@ -45,7 +46,12 @@ readonly RAW_BASE="https://raw.githubusercontent.com/Digitalweb-ir/dn-notificati
 # env var and the request will pick it up automatically.
 readonly RELEASES_API="https://api.github.com/repos/Digitalweb-ir/dn-notification/releases/latest"
 readonly DOCKER_IMAGE="digitalneetwork/dn-notification:latest"
-readonly CONTAINER_VERSION_FILE="/app/VERSION"  # baked into the image (Dockerfile)
+# OCI image label set by the release workflow. The version baked into
+# the running image is the only installed-version signal we need; the
+# CLI used to `docker exec cat /app/VERSION` but the on-disk VERSION
+# file is gone — the version is now owned by the git tag and stamped
+# on the image at build time.
+readonly IMAGE_VERSION_LABEL="org.opencontainers.image.version"
 
 # -----------------------------------------------------------------------------
 # Filesystem layout
@@ -490,10 +496,31 @@ container_is_running() {
 }
 
 read_installed_version() {
-    if ! container_is_running; then
+    # Read the version from the local image's OCI label, not from
+    # inside the running container. This is more robust than the old
+    # `docker exec cat /app/VERSION` because:
+    #   * It works even when the container is not currently running.
+    #   * The label is stamped at build time from the same git tag
+    #     the GitHub Releases API returns, so the two can never drift.
+    #   * It does not depend on a baked-in /app/VERSION file (which
+    #     was the original staleness problem: the file was committed
+    #     by CI but the local checkout could be out of date).
+    #
+    # Returns the version string on stdout and exit 0, or exits 1
+    # when the image or label cannot be read.
+    if ! command -v docker >/dev/null 2>&1; then
         return 1
     fi
-    docker exec "$SERVICE_NAME" cat "$CONTAINER_VERSION_FILE" 2>/dev/null | tr -d '[:space:]'
+    if ! docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
+        return 1
+    fi
+    local v
+    v=$(docker image inspect --format "{{index .Config.Labels \"${IMAGE_VERSION_LABEL}\"}}" "$DOCKER_IMAGE" 2>/dev/null \
+        | tr -d '[:space:]')
+    if [[ -z "$v" ]]; then
+        return 1
+    fi
+    printf '%s' "$v"
 }
 
 # -----------------------------------------------------------------------------
@@ -565,12 +592,15 @@ cmd_update() {
 
     log_section "Update"
 
-    # Step 1: read installed version from the running container.
+    # Step 1: read installed version from the local image's OCI label.
+    # The version is stamped on the image at build time, so we do not
+    # need the container to be running to know what's installed.
     local installed
     if ! installed=$(read_installed_version); then
-        die "Container $SERVICE_NAME is not running. Start it with '$SCRIPT_NAME up' first."
+        die "Could not read the installed version from $DOCKER_IMAGE. " \
+            "Is the image pulled? Try '$SCRIPT_NAME up' first, or '$SCRIPT_NAME status' for details."
     fi
-    log_info "Installed version (from container): $installed"
+    log_info "Installed version (from image label): $installed"
 
     # Step 2: read the latest release tag from the GitHub Releases API.
     # The API returns the latest non-draft, non-prerelease release; for
@@ -678,15 +708,17 @@ cmd_edit() {
 cmd_edit_env() { cmd_edit "$ENV_FILE"; }
 
 cmd_version() {
-    if container_is_running; then
-        local v
-        v=$(read_installed_version)
-        if [[ -n "$v" ]]; then
-            printf '%s %s (container)\n' "$SCRIPT_NAME" "$v"
-            return
-        fi
+    # Print the version baked into the local image. The image's
+    # OCI label is the same value `APP_VERSION` env var exposes
+    # inside the running container, so this matches what the app
+    # itself reports. We can read the label whether the container
+    # is up or not, so we no longer gate on `container_is_running`.
+    local v
+    if v=$(read_installed_version); then
+        printf '%s %s\n' "$SCRIPT_NAME" "$v"
+        return
     fi
-    printf '%s %s (no running container)\n' "$SCRIPT_NAME" "$SCRIPT_VERSION"
+    printf '%s %s (no image installed)\n' "$SCRIPT_NAME" "$SCRIPT_VERSION"
 }
 
 cmd_status() {
@@ -735,6 +767,14 @@ cmd_status() {
         printf '  %s%-12s%s %s\n' "$C_BOLD" "port"        "$C_RESET" "$port"
     else
         printf '  %s%-12s%s %s\n' "$C_BOLD" "container"   "$C_RESET" "${C_RED}stopped${C_RESET}"
+        # The image is the source of truth for the installed version
+        # (the version is on the image, not on the container state).
+        # Show it here too, so `status` is useful even when down.
+        local stopped_version
+        stopped_version=$(read_installed_version 2>/dev/null || true)
+        if [[ -n "$stopped_version" ]]; then
+            printf '  %s%-12s%s %s (image)\n' "$C_BOLD" "version" "$C_RESET" "$stopped_version"
+        fi
     fi
 
     # HTTP health (best-effort)

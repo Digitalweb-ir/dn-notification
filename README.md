@@ -60,9 +60,10 @@ sudo dnnotification update
 
 The `update` flow:
 
-1. Reads the currently installed version from inside the running container
-   (`docker exec dn-notification cat /app/VERSION`).
-2. Fetches the latest `VERSION` from `Digitalweb-ir/dn-notification@main`.
+1. Reads the currently installed version from the local image's
+   OCI label (`docker image inspect --format ... org.opencontainers.image.version`).
+2. Fetches the latest release tag from the GitHub Releases API
+   (`/repos/Digitalweb-ir/dn-notification/releases/latest`).
 3. If the versions match, prints `You already have the latest version: …` and
    exits. Otherwise it prompts `Do you want to install it? (yes/no)`.
 4. Downloads the latest `docker-compose.yaml` and `.env.example` into
@@ -81,7 +82,7 @@ The `update` flow:
 
 ```
 app/
-├── __init__.py           # __version__ (loaded from ../VERSION at import time)
+├── __init__.py           # __version__ (APP_VERSION env → git describe → "0.0.0+unknown")
 ├── main.py               # FastAPI app, lifespan, routes, auth
 ├── config.py             # Pydantic settings (loads .env, derives sub-paths from DATA_DIR)
 ├── logger.py             # Structured logging setup
@@ -91,12 +92,10 @@ app/
 └── voice_service.py      # Voice file mapping + send_file
 
 dnnotification.sh         # Deployment CLI (installed to /usr/local/bin/dnnotification)
-VERSION                   # On-disk release version, written by semantic-release
 package.json              # Minimal Node manifest; pins semantic-release for CI
 release.config.cjs        # semantic-release configuration
-write-version.sh          # Writes VERSION and app/__init__.py for a new release
 docker-compose.yaml       # Single-service compose file (uses pre-built image)
-Dockerfile                # Production image (Python 3.11 slim, runs as root, tini, healthcheck)
+Dockerfile                # Production image; takes VERSION as a build-arg, stamps OCI labels
 .env.example              # Documented env template (copy to .env)
 .github/workflows/        # CI: semantic-release + Docker image publish on main
 ```
@@ -123,12 +122,21 @@ inside the container and on the host stay aligned without any extra wiring.
 ### Versioning
 
 The project is versioned and released by [semantic-release](https://github.com/semantic-release/semantic-release).
-The git tag (`vX.Y.Z`) plus a GitHub Release entry are the canonical
-release marker. `VERSION` and `app/__init__.py` are *derived* from that
-release: `scripts/write-version.sh` writes the version into the `VERSION`
-file and the `# Version:` header in `app/__init__.py`, and the running
-container reports its real release because the same `VERSION` file is
-baked into the Docker image (copied to `/app/VERSION`).
+The git tag (`vX.Y.Z`) is the canonical release marker — the single
+source of truth. semantic-release cuts the tag and creates a GitHub
+Release; the release workflow then passes the tag into the Docker
+build as a build-arg (`VERSION=...`) which is baked in two ways:
+
+* as the `APP_VERSION` env var, which `app/__init__.py` reads at
+  import time so the running app's `__version__` matches the tag,
+* as the `org.opencontainers.image.version` OCI label, which the
+  `dnnotification` CLI reads to detect new releases.
+
+There is no on-disk `VERSION` file in the repo: keeping a file in
+sync with the tag created a stale-cache problem where a developer's
+local checkout would be out of date with the version CI released.
+With the tag as the source of truth, the local checkout and the
+released image are guaranteed to agree on the next commit.
 
 Conventional Commits drive the bump:
 
@@ -150,13 +158,17 @@ CI (`.github/workflows/release.yml`) does three things:
    push and PR.
 2. **Release** — on pushes to `main`, runs `npx semantic-release`.
    This analyzes commits since the last tag, picks the next version,
-   runs `write-version.sh` to update `VERSION` and `app/__init__.py`,
-   commits the changes, creates the `vX.Y.Z` tag, and creates a
-   GitHub Release with auto-generated notes. PRs run the same
-   command in `--dry-run` and only log the would-be version.
-3. **Docker** — on pushes to `main` after a successful release, builds
-   and pushes a multi-arch (`linux/amd64`, `linux/arm64`) image to
-   `digitalneetwork/dn-notification:<version>` and `:latest`.
+   creates the `vX.Y.Z` tag, and creates a GitHub Release with
+   auto-generated notes. PRs run the same command in `--dry-run` and
+   only log the would-be version.
+3. **Docker** — on pushes to `main` after a successful release,
+   resolves the new tag, builds a multi-arch
+   (`linux/amd64`, `linux/arm64`) image with `VERSION=<x.y.z>` as a
+   build-arg, and pushes
+   `digitalneetwork/dn-notification:<version>` and `:latest` to
+   Docker Hub. The same value lands on the
+   `org.opencontainers.image.version` OCI label, which is what
+   `dnnotification update` compares against the GitHub Releases API.
 
 Required GitHub Actions secrets (configured in **Settings → Secrets
 and variables → Actions**, referenced inline via `${{ secrets.X }}`):

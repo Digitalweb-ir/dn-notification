@@ -18,5 +18,4 @@ venv
 node_modules
 package-lock.json
 release.config.cjs
-write-version.sh
 .github/

@@ -24,6 +24,29 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # ---------- Stage 2: runtime ----------
 FROM python:3.11-slim AS runtime
 
+# Versioning
+# ----------
+# The release version is owned by semantic-release (the git tag is the
+# version). The release workflow passes that tag to this Dockerfile as
+# `VERSION` (see .github/workflows/release.yml). We:
+#   * bake it into the image as the `APP_VERSION` env var, which
+#     `app/__init__.py` reads as its primary source of truth;
+#   * expose it on the OCI image label `org.opencontainers.image.version`
+#     so the dnnotification CLI can read the installed version with
+#     `docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}'`
+#     instead of `docker exec`ing into the container.
+#
+# In development, `APP_VERSION` is unset and `app/__init__.py` falls
+# back to `git describe --tags --dirty`. The default `0.0.0-dev` keeps
+# the image runnable in isolation (e.g. local `docker build .` without
+# a tag) without forcing the developer to set a build-arg.
+ARG VERSION=0.0.0-dev
+ENV APP_VERSION=${VERSION}
+LABEL org.opencontainers.image.version=${VERSION} \
+      org.opencontainers.image.title="dn-notification" \
+      org.opencontainers.image.source="https://github.com/Digitalweb-ir/dn-notification" \
+      org.opencontainers.image.licenses="MIT"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -44,10 +67,6 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir "uvicorn[standard]==0.30.6"
 
 COPY app ./app
-
-# Single source of truth for the image version. Read at runtime by the
-# CLI's update flow to compare against the latest published version.
-COPY VERSION ./VERSION
 
 # Persistent data lives under /var/lib/dn-notification (configurable
 # via DATA_DIR at runtime). The host bind-mounts the same path from
