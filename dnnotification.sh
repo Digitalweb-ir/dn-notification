@@ -304,6 +304,14 @@ install_cli() {
     fi
 
     as_root install -d -m 0755 "$INSTALL_BIN_DIR"
+    # If the destination already exists, remove it first. This matters
+    # when re-running `install-cli` and the source resolves to the same
+    # path as the destination (e.g. /usr/local/bin/dnnotification ->
+    # /usr/local/bin/dnnotification): `install` refuses to copy a file
+    # onto itself, and without this rm the call would fail.
+    if [[ -e "$INSTALL_BIN_PATH" ]]; then
+        as_root rm -f "$INSTALL_BIN_PATH"
+    fi
     as_root install -m 0755 "$SCRIPT_PATH" "$INSTALL_BIN_PATH"
 
     if [[ -x "$INSTALL_BIN_PATH" ]]; then
