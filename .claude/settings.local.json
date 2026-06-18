@@ -58,7 +58,8 @@
       "Bash(node -c /Users/erfan/Projects/dn-deactive-notification/release.config.cjs)",
       "Bash(APP_VERSION=\"2.0.0\" python3 -c \"import sys; sys.path.insert\\(0, '/Users/erfan/Projects/dn-deactive-notification'\\); from app import __version__; print\\('env path:', __version__\\)\")",
       "Bash(python3 -c \"import sys; sys.path.insert\\(0, '/Users/erfan/Projects/dn-deactive-notification'\\); from app import __version__; print\\('git describe path:', __version__\\)\")",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(npm install *)"
     ]
   }
 }

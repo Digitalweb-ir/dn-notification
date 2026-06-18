@@ -2,6 +2,13 @@
   "name": "dn-notification",
   "version": "0.0.0-semantic-release",
   "private": true,
-  "description": "Personal-account Telegram automation (MTProto/Telethon) for support workflows. This package.json is kept as a marker so the repository can be treated as a Node project when needed, but semantic-release is installed on demand in CI (per the official semantic-release recommendation) and the project itself is a Python application."
+  "description": "Personal-account Telegram automation (MTProto/Telethon) for support workflows. This package.json is kept as a marker so the repository can be treated as a Node project when needed, but semantic-release is installed on demand in CI (per the official semantic-release recommendation) and the project itself is a Python application.",
+  "devDependencies": {
+    "@semantic-release/commit-analyzer": "^13.0.1",
+    "@semantic-release/exec": "^7.1.0",
+    "@semantic-release/github": "^12.0.8",
+    "@semantic-release/npm": "^13.1.5",
+    "@semantic-release/release-notes-generator": "^14.1.1",
+    "semantic-release": "^25.0.5"
+  }
 }
-
