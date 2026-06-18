@@ -228,5 +228,12 @@ jobs:
             VERSION=${{ needs.release.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=digitalneetwork/dn-notification:buildcache
-          cache-to:   type=registry,ref=digitalneetwork/dn-notification:buildcache,mode=max
+          # Use the GitHub Actions cache backend (type=gha) instead of
+          # pushing cache layers to Docker Hub. The previous registry-
+          # backed cache (digitalneetwork/dn-notification:buildcache)
+          # created an unintended `buildcache` tag on Docker Hub on
+          # every run. type=gha stores cache blobs in the workflow's
+          # own cache scope, so Docker Hub only ever sees the two
+          # real tags: the release version (e.g. 1.2.3) and `latest`.
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
