@@ -190,21 +190,18 @@ jobs:
           # Docker Hub's recommended credential type for CI.
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
+      - name: Extract metadata (labels)
         id: meta
         env:
           RELEASE_VERSION: ${{ needs.release.outputs.version }}
         uses: docker/metadata-action@v5
         with:
-          # The release version (from semantic-release's job output)
-          # is the only fixed source of truth for the image tags.
-          # The :latest tag is a convenience alias, but the
-          # versioned tag is the one the CLI's update flow reads
-          # to know what is currently installed.
+          # Tags are passed directly to build-push-action below (so the
+          # version from needs.release.outputs.version and `latest` are
+          # applied in a single multi-tag push). We only use this step
+          # to render the OCI labels.
           images: digitalneetwork/dn-notification
-          tags: |
-            type=raw,value={{env.RELEASE_VERSION}}
-            type=raw,value=latest,enable={{is_default_branch}}
+          tags: ""
           labels: |
             org.opencontainers.image.version={{env.RELEASE_VERSION}}
             org.opencontainers.image.title=dn-notification
@@ -220,14 +217,17 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           # APP_VERSION is read by app/__init__.py at import time.
-          # The OCI image.version label is set by metadata-action
-          # above and stamped on the image by buildx. Both come
-          # from the same job output of the `release` job, which
-          # received it from semantic-release's successCmd.
           build-args: |
             VERSION=${{ needs.release.outputs.version }}
-          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Build the image once and push both tags in the same step.
+          # The version comes from the `release` job's output; `latest`
+          # is the convenience alias. Passing both as a multiline list
+          # to `tags:` makes buildx push a single multi-arch image
+          # under both names in one go, with no extra registry tags.
+          tags: |
+            digitalneetwork/dn-notification:${{ needs.release.outputs.version }}
+            digitalneetwork/dn-notification:latest
           # Use the GitHub Actions cache backend (type=gha) instead of
           # pushing cache layers to Docker Hub. The previous registry-
           # backed cache (digitalneetwork/dn-notification:buildcache)
