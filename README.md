@@ -214,25 +214,44 @@ cp .env.example .env
 ### 4. First-time login
 
 The first run is interactive — Telethon needs the SMS code Telegram sends
-to your phone (and your 2FA password, if enabled).
+to your phone (and your 2FA password, if enabled). The project ships a
+dedicated CLI for this:
 
 ```bash
-export TG_PHONE="+1234567890"
-export TG_CODE="12345"          # code Telegram sent to your Telegram app
-# If you have 2FA:
-# export TG_2FA_PASSWORD="your_cloud_password"
-
-python -c "import asyncio
-from app.telegram_client import get_telegram_service
-async def main():
-    svc = get_telegram_service()
-    await svc.start()
-    await svc.stop()
-asyncio.run(main())"
+python -m app.cli tglogin
 ```
 
-This creates a `telegram_session.session` file in the project root. **Keep this
-file safe — anyone with it can access your Telegram account.**
+What happens:
+
+1. Telegram sends a login code to your Telegram app.
+2. The CLI prompts for the code. **Input is hidden** (it uses
+   `getpass`) — the code is never echoed to the terminal, never
+   logged, and never written to disk.
+3. If you mistype the code, the CLI re-prompts without re-sending
+   (the original code remains valid until it expires).
+4. If 2FA is enabled on the account, the CLI prompts for the cloud
+   password next (also hidden).
+5. On success, `telegram_session.session` is written to the
+   `session/` subdirectory of `DATA_DIR` (default
+   `/var/lib/dn-notification/session/telegram_session.session`).
+   The file is persistent across restarts.
+
+**In production (Docker):** the host CLI exposes the Python CLI via
+a thin passthrough. Run:
+
+```bash
+sudo dnnotification cli tglogin
+```
+
+`dnnotification cli <command> [args…]` runs the corresponding
+command inside the container via `docker exec -it`. Any command the
+Python CLI adds in the future is automatically available through
+the passthrough. See
+[`DEPLOYMENT.md`](DEPLOYMENT.md#6-first-time-telegram-login) for
+details.
+
+**Keep this file safe — anyone with it can access your Telegram
+account.**
 
 ### 5. Add voice files
 

@@ -61,7 +61,32 @@
       "Bash(python3 -c ' *)",
       "Bash(npm install *)",
       "Bash(npm ls *)",
-      "Bash(npm ci *)"
+      "Bash(npm ci *)",
+      "Bash(/tmp/.dnapp-venv/bin/python -m app.cli status)",
+      "Bash(/tmp/.dnapp-venv/bin/python -m dnapp --help)",
+      "Bash(/tmp/.dnapp-venv/bin/python -m app.cli --help)",
+      "Bash(/tmp/.dnapp-venv/bin/python -m app.cli login --help)",
+      "Bash(/tmp/.dnapp-venv/bin/python -m app.cli status --help)",
+      "Bash(PYTHONPATH=/Users/erfan/Projects/dn-deactive-notification /tmp/.dnapp-venv/bin/python -m app.cli status)",
+      "Bash(/Users/erfan/Projects/dn-deactive-notification/dnnotification.sh help *)",
+      "Bash(python3 -m venv /tmp/.dnapp-venv2)",
+      "Bash(/tmp/.dnapp-venv2/bin/pip install *)",
+      "Bash(PYTHONPATH=/Users/erfan/Projects/dn-deactive-notification /tmp/.dnapp-venv2/bin/python -m app.dnapp --help)",
+      "Bash(PYTHONPATH=/Users/erfan/Projects/dn-deactive-notification /tmp/.dnapp-venv2/bin/python -m app.cli --help)",
+      "Bash(python3 -c \"import ast; [ast.parse\\(open\\(f\\).read\\(\\)\\) for f in ['/Users/erfan/Projects/dn-deactive-notification/app/cli.py','/Users/erfan/Projects/dn-deactive-notification/app/tgapp.py','/Users/erfan/Projects/dn-deactive-notification/app/telegram_client.py']]; print\\('OK'\\)\")",
+      "Bash(python3 -m venv /tmp/.tgapp-venv)",
+      "Bash(/tmp/.tgapp-venv/bin/pip install *)",
+      "Bash(PYTHONPATH=/Users/erfan/Projects/dn-deactive-notification /tmp/.tgapp-venv/bin/python -m app.tgapp --help)",
+      "Bash(PYTHONPATH=/Users/erfan/Projects/dn-deactive-notification /tmp/.tgapp-venv/bin/python -m app.tgapp tglogin --help)",
+      "Bash(PYTHONPATH=/Users/erfan/Projects/dn-deactive-notification /tmp/.tgapp-venv/bin/python -m app.tgapp status --help)",
+      "Bash(/Users/erfan/Projects/dn-deactive-notification/dnnotification.sh cli *)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/Users/erfan/Projects/dn-deactive-notification/app/cli.py'\\).read\\(\\)\\); ast.parse\\(open\\('/Users/erfan/Projects/dn-deactive-notification/app/telegram_client.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python3 -m venv /tmp/.cli-venv)",
+      "Bash(/tmp/.cli-venv/bin/pip install *)",
+      "Bash(PYTHONPATH=/Users/erfan/Projects/dn-deactive-notification /tmp/.cli-venv/bin/python -m app.cli --help)",
+      "Bash(PYTHONPATH=/Users/erfan/Projects/dn-deactive-notification /tmp/.cli-venv/bin/python -m app.cli tglogin --help)",
+      "Bash(PYTHONPATH=/Users/erfan/Projects/dn-deactive-notification /tmp/.cli-venv/bin/python -m app.cli status --help)",
+      "Bash(PYTHONPATH=/Users/erfan/Projects/dn-deactive-notification /tmp/.cli-venv/bin/python -m app.cli status)"
     ]
   }
 }

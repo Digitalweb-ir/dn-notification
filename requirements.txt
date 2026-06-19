@@ -5,3 +5,10 @@ pydantic==2.9.2
 pydantic-settings==2.5.2
 python-dotenv==1.0.1
 python-multipart==0.0.10
+# typer is the operator CLI (`python -m dnapp login`). Click 8.4.x
+# removed the `ctx` positional arg from `Parameter.make_metavar()`,
+# which crashes Typer 0.12.5's help renderer; pin to the last 8.1.x
+# release until Typer catches up.
+typer==0.12.5
+click<8.2
+rich<14

@@ -155,28 +155,76 @@ defaults in `.env.example` and can be left as-is.
 
 ## 6. First-time Telegram login
 
-The first run is **interactive** — Telethon needs the SMS code Telegram sends
-to your phone (and your 2FA password, if enabled). The CLI doesn't perform
-login for you; do it from a shell on the host:
+The first run is **interactive** — Telethon needs the SMS code Telegram
+sends to your phone (and your 2FA password, if enabled). The
+operator CLI is the in-container Python CLI (`python -m app.cli`),
+exposed on the host via a thin passthrough:
 
 ```bash
-# If you have 2FA enabled, also:
-# export TG_2FA_PASSWORD="your_cloud_password"
-
-docker compose -f /opt/dn-notification/docker-compose.yaml exec dn-notification \
-    python -c "
-import asyncio
-from app.telegram_client import get_telegram_service
-async def main():
-    svc = get_telegram_service()
-    await svc.start()
-    await svc.stop()
-asyncio.run(main())
-"
+sudo dnnotification cli tglogin
 ```
 
-The `.session` file is created under `/var/lib/dn-notification/session/` and
-persists across container restarts. Subsequent boots are non-interactive.
+What it does, in order:
+
+1. Brings the container up if it is not already running (the FastAPI
+   lifespan will fail without a session, but `docker exec` still
+   attaches).
+2. Runs `python -m app.cli tglogin` inside the container with a
+   TTY attached (`docker exec -it`). Telegram sends a code to your
+   Telegram app.
+3. The CLI prompts for the code (input is hidden via `getpass` — the
+   code is **never echoed to the terminal**, never logged, never
+   written to disk). On a typo, it re-prompts without re-sending —
+   the original code remains valid until it expires.
+4. If the account has 2FA enabled, the CLI prompts for the cloud
+   password next (also hidden).
+5. On success, the `.session` file is written to
+   `/var/lib/dn-notification/session/` on the host bind-mount.
+6. The service is restarted automatically so the running container's
+   in-memory Telethon client picks up the new session file.
+
+Verify with:
+
+```bash
+sudo dnnotification cli status
+curl -s http://localhost:8000/health
+# {"status": "ok", "telegram_connected": true, "session": "telegram_session"}
+```
+
+The `.session` file persists across container restarts and updates;
+you only need to re-run `tglogin` if Telegram invalidates the session
+(e.g. you signed the account out from another device, or the auth
+key expired).
+
+### The `cli` passthrough
+
+`dnnotification cli` is a thin `docker exec` wrapper around the
+in-container Python CLI. Run `dnnotification cli` (no arguments) to
+see the CLI's own menu / help. Any command the Python CLI adds in
+the future (`tglogin`, `status`, future ones like `logout`,
+`whoami`, …) is automatically reachable through the wrapper —
+the shell script does not need to be touched again.
+
+> **TTY requirement.** The passthrough always allocates a TTY
+> (`docker exec -it`) because `tglogin` reads the SMS code and 2FA
+> password via `getpass`. That means `dnnotification cli …` cannot
+> be driven from a non-interactive shell (cron, scripts). For
+> scripted use, call `docker exec -i …` directly.
+
+### Scripted / non-interactive login
+
+For automation, the lifespan still accepts `TG_CODE` and
+`TG_2FA_PASSWORD` as container env vars:
+
+```bash
+docker compose -f /opt/dn-notification/docker-compose.yaml exec \
+    -e TG_CODE=12345 -e TG_2FA_PASSWORD=your_cloud_password \
+    dn-notification python -m app.cli tglogin
+```
+
+The code still has to be received first and entered immediately
+(it is single-use and short-lived), so this is rarely the right
+shape — `dnnotification cli tglogin` is.
 
 ---
 
@@ -192,10 +240,11 @@ dnnotification
   3) Down
   4) Restart
   5) Update
-  6) Logs
-  7) Edit compose
-  8) Edit env
-  9) Status
+  6) CLI (passthrough to Python CLI)
+  7) Logs
+  8) Edit compose
+  9) Edit env
+ 10) Status
   0) Exit
 ```
 

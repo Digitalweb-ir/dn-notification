@@ -81,7 +81,7 @@ readonly INSTALL_BIN_PATH="${INSTALL_BIN_DIR}/${INSTALL_BIN_NAME}"
 
 readonly SERVICE_NAME="dn-notification"
 readonly SCRIPT_NAME="dnnotification"
-readonly SCRIPT_VERSION="2.1.0"
+readonly SCRIPT_VERSION="2.3.0"
 
 # -----------------------------------------------------------------------------
 # Colors (auto-disabled if stdout isn't a TTY or NO_COLOR is set).
@@ -549,14 +549,31 @@ cmd_install() {
         log_warn "$VOICES_DIR is empty. Drop at least one .ogg file (e.g. limited.ogg) before /send-voice will work."
     fi
 
-    if [[ -f "$COMPOSE_FILE" ]]; then
-        log_info "Pulling image and starting services…"
-        compose pull
-        compose up -d
-        cmd_status
-    else
+    if [[ ! -f "$COMPOSE_FILE" ]]; then
         log_warn "Skipping 'docker compose up' — no compose file present at $COMPOSE_FILE."
+        return 0
     fi
+
+    # If no Telegram session file exists yet, do NOT bring the
+    # service up: the FastAPI lifespan would fail on first boot
+    # (Telethon needs a .session file that does not exist yet) and
+    # the container would crash-loop. Instead, point the operator at
+    # `dnnotification cli tglogin`, which writes the .session to the
+    # host bind-mount and then brings the service up cleanly.
+    if ! ls "$SESSION_DIR"/*.session >/dev/null 2>&1; then
+        log_warn "No Telegram session found under $SESSION_DIR."
+        log_warn "Skipping 'docker compose up' — the service cannot start"
+        log_warn "without a session file. Sign in with:"
+        log_warn "    sudo $SCRIPT_NAME cli tglogin"
+        log_warn "and the service will be started automatically once the"
+        log_warn "session is on disk."
+        return 0
+    fi
+
+    log_info "Pulling image and starting services…"
+    compose pull
+    compose up -d
+    cmd_status
 }
 
 cmd_install_cli() {
@@ -586,6 +603,60 @@ cmd_restart() {
     log_info "Restarting…"
     compose restart "$@"
     cmd_status
+}
+
+# -----------------------------------------------------------------------------
+# cli — generic passthrough to the in-container Python CLI.
+#
+# Why this exists
+# ---------------
+# The Python CLI (`python -m app.cli`) is the authoritative place for
+# operator commands that need to talk to Telethon or to the running
+# container's filesystem (e.g. `tglogin` to write the .session file,
+# `status` to verify a session exists, future things like `logout`).
+#
+# Instead of mirroring every Python command as a separate shell
+# subcommand, this `cli` wrapper just `docker exec`s into the running
+# container and forwards the rest of the argument vector verbatim:
+#
+#     dnnotification cli               # → tgapp --help  (Typer prints menu)
+#     dnnotification cli tglogin       # → tgapp tglogin
+#     dnnotification cli status        # → tgapp status
+#     dnnotification cli <future cmd>  # → tgapp <future cmd>
+#
+# Any Python CLI command added later is automatically available through
+# the shell wrapper with no shell-side changes.
+#
+# TTY allocation
+# --------------
+# `tglogin` reads the SMS code and 2FA password via getpass, which
+# needs a TTY. We therefore pass `-it` to `docker exec` so the prompt
+# renders correctly. The trade-off is that `dnnotification cli …`
+# cannot be driven from a non-interactive shell (cron, scripts);
+# in those contexts, use `docker exec -i …` directly.
+# -----------------------------------------------------------------------------
+cmd_cli() {
+    check_docker
+    [[ -f "$COMPOSE_FILE" ]] || die "No compose file at $COMPOSE_FILE — run '$SCRIPT_NAME install' first."
+
+    # If the container is not running, `docker exec` has no target.
+    # Try to start it once. The lifespan may fail (e.g. no .session
+    # yet) and the container will be in a "restarting" state, which
+    # is enough for `docker exec` to attach.
+    if ! container_is_running; then
+        log_info "Container is not running — starting it so the CLI exec target exists…"
+        compose up -d >/dev/null 2>&1 || true
+        local i
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+            container_is_running && break
+            sleep 1
+        done
+    fi
+
+    # Forward "$@" verbatim. -it ensures a TTY so getpass works for
+    # `tglogin`; the Typer help/menu is unaffected by the TTY.
+    docker compose -f "$COMPOSE_FILE" exec -it "$SERVICE_NAME" \
+        python -m app.cli "$@"
 }
 
 cmd_logs() {
@@ -816,24 +887,26 @@ menu_loop() {
         printf '  %s3)%s Down\n'                         "$C_BOLD" "$C_RESET"
         printf '  %s4)%s Restart\n'                      "$C_BOLD" "$C_RESET"
         printf '  %s5)%s Update (check + merge + redeploy)\n' "$C_BOLD" "$C_RESET"
-        printf '  %s6)%s Logs (follow)\n'                "$C_BOLD" "$C_RESET"
-        printf '  %s7)%s Edit docker-compose\n'          "$C_BOLD" "$C_RESET"
-        printf '  %s8)%s Edit .env\n'                    "$C_BOLD" "$C_RESET"
-        printf '  %s9)%s Status\n'                       "$C_BOLD" "$C_RESET"
+        printf '  %s6)%s CLI (passthrough to Python CLI)\n' "$C_BOLD" "$C_RESET"
+        printf '  %s7)%s Logs (follow)\n'                "$C_BOLD" "$C_RESET"
+        printf '  %s8)%s Edit docker-compose\n'          "$C_BOLD" "$C_RESET"
+        printf '  %s9)%s Edit .env\n'                    "$C_BOLD" "$C_RESET"
+        printf '  %s10)%s Status\n'                      "$C_BOLD" "$C_RESET"
         printf '  %s0)%s Exit\n'                         "$C_BOLD" "$C_RESET"
         printf '\n'
         local choice
-        read -r -p "Select [0-9]: " choice
+        read -r -p "Select [0-10]: " choice
         case "$choice" in
             1) cmd_install ;;
             2) cmd_up ;;
             3) cmd_down ;;
             4) cmd_restart ;;
             5) cmd_update ;;
-            6) cmd_logs; printf '\n' ;;
-            7) cmd_edit "$COMPOSE_FILE" ;;
-            8) cmd_edit "$ENV_FILE" ;;
-            9) cmd_status ;;
+            6) cmd_cli ;;
+            7) cmd_logs; printf '\n' ;;
+            8) cmd_edit "$COMPOSE_FILE" ;;
+            9) cmd_edit "$ENV_FILE" ;;
+            10) cmd_status ;;
             0) printf 'Bye.\n'; return 0 ;;
             *) log_warn "Invalid choice: $choice" ;;
         esac
@@ -859,6 +932,8 @@ Commands:
   up             docker compose up -d
   down           docker compose down
   restart        docker compose restart
+  cli [args...]  Passthrough to the in-container Python CLI (e.g. \`cli tglogin\`,
+                 \`cli status\`). \`cli\` with no args prints the Python CLI menu.
   logs           docker compose logs -f
   update         Check installed version (via GitHub Releases API), merge .env, redeploy with new image
   edit           Open docker-compose.yaml in an editor
@@ -890,6 +965,7 @@ main() {
         up)             shift; cmd_up "$@" ;;
         down)           shift; cmd_down "$@" ;;
         restart)        shift; cmd_restart "$@" ;;
+        cli)            shift; cmd_cli "$@" ;;
         logs)           shift; cmd_logs "$@" ;;
         update)         shift; cmd_update "$@" ;;
         edit)           shift; cmd_edit "$@" ;;
