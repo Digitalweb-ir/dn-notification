@@ -591,9 +591,9 @@ cmd_install() {
         printf '\n'
         log_info "No Telegram session under $SESSION_DIR — the service is up"
         log_info "but endpoints that need a session will return 503. Sign in with:"
-        log_info "    sudo $SCRIPT_NAME cli tglogin"
-        log_info "and the running container will pick up the new session on its"
-        log_info "next restart (or use '$SCRIPT_NAME restart' to pick it up now)."
+        log_info "    sudo $SCRIPT_NAME login"
+        log_info "which handles both the interactive prompt and the service restart"
+        log_info "needed to load the new session."
     fi
 }
 
@@ -679,6 +679,59 @@ cmd_cli() {
     # `tglogin`; the Typer help/menu is unaffected by the TTY.
     docker compose -f "$COMPOSE_FILE" exec -it "$SERVICE_NAME" \
         python -m app.cli "$@"
+}
+
+# login — sign in to Telegram and reload the running service.
+#
+# The .session file is written by `app.cli tglogin` running INSIDE
+# the container against the bind-mounted $SESSION_DIR. The running
+# service, however, was started before the session existed, and its
+# in-memory Telethon client is bound to the (empty) SQLite DB it
+# opened at startup. We therefore `docker compose restart` the
+# service so its lifespan re-runs, the new client picks up the
+# freshly-written auth_key, and `/search` + `/send-voice` start
+# returning real data instead of 503.
+#
+# This is the host-side wrapper operators should use instead of
+# `dnnotification cli tglogin` directly — `cli tglogin` writes the
+# file but does not reload the service, which is the symptom that
+# the user reported as "the session isn't persisting".
+cmd_login() {
+    check_docker
+    [[ -f "$COMPOSE_FILE" ]] || die "No compose file at $COMPOSE_FILE — run '$SCRIPT_NAME install' first."
+
+    # If the container is not running, `docker exec` has no target.
+    # Bring it up first — the lifespan starts in disconnected mode
+    # when no .session is on disk, so this is safe.
+    if ! container_is_running; then
+        log_info "Container is not running — starting it so the CLI exec target exists…"
+        compose up -d >/dev/null 2>&1 || true
+        local i
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+            container_is_running && break
+            sleep 1
+        done
+        container_is_running || die "Container did not come up in time — check 'docker logs $SERVICE_NAME'."
+    fi
+
+    # Drive the interactive login. -it gives getpass a TTY; we do
+    # NOT pass -T because the operator must type the SMS code.
+    log_info "Starting interactive Telegram login (you will be prompted for the SMS code and 2FA password)…"
+    if ! docker compose -f "$COMPOSE_FILE" exec -it "$SERVICE_NAME" \
+            python -m app.cli tglogin; then
+        die "Login aborted — the .session file may be incomplete. Re-run '$SCRIPT_NAME login' to retry."
+    fi
+
+    # The login wrote a fresh .session file to $SESSION_DIR. Now
+    # restart the service so the new auth_key is loaded by the
+    # lifespan — without this step, the running container's
+    # Telethon client is still bound to the (empty) DB it opened
+    # at startup, and endpoints that need a session keep returning
+    # 503.
+    log_info "Restarting the service so the new session is loaded…"
+    compose restart "$SERVICE_NAME" >/dev/null
+    cmd_status
+    log_ok "Login complete. The session is loaded and /search + /send-voice are live."
 }
 
 cmd_logs() {
@@ -914,26 +967,28 @@ menu_loop() {
         printf '  %s3)%s Down\n'                         "$C_BOLD" "$C_RESET"
         printf '  %s4)%s Restart\n'                      "$C_BOLD" "$C_RESET"
         printf '  %s5)%s Update (check + merge + redeploy)\n' "$C_BOLD" "$C_RESET"
-        printf '  %s6)%s CLI (passthrough to Python CLI)\n' "$C_BOLD" "$C_RESET"
-        printf '  %s7)%s Logs (follow)\n'                "$C_BOLD" "$C_RESET"
-        printf '  %s8)%s Edit docker-compose\n'          "$C_BOLD" "$C_RESET"
-        printf '  %s9)%s Edit .env\n'                    "$C_BOLD" "$C_RESET"
-        printf '  %s10)%s Status\n'                      "$C_BOLD" "$C_RESET"
+        printf '  %s6)%s Login (Telegram, then restart)\n' "$C_BOLD" "$C_RESET"
+        printf '  %s7)%s CLI (passthrough to Python CLI)\n' "$C_BOLD" "$C_RESET"
+        printf '  %s8)%s Logs (follow)\n'                "$C_BOLD" "$C_RESET"
+        printf '  %s9)%s Edit docker-compose\n'          "$C_BOLD" "$C_RESET"
+        printf '  %s10)%s Edit .env\n'                   "$C_BOLD" "$C_RESET"
+        printf '  %s11)%s Status\n'                      "$C_BOLD" "$C_RESET"
         printf '  %s0)%s Exit\n'                         "$C_BOLD" "$C_RESET"
         printf '\n'
         local choice
-        read -r -p "Select [0-10]: " choice
+        read -r -p "Select [0-11]: " choice
         case "$choice" in
             1) cmd_install ;;
             2) cmd_up ;;
             3) cmd_down ;;
             4) cmd_restart ;;
             5) cmd_update ;;
-            6) cmd_cli ;;
-            7) cmd_logs; printf '\n' ;;
-            8) cmd_edit "$COMPOSE_FILE" ;;
-            9) cmd_edit "$ENV_FILE" ;;
-            10) cmd_status ;;
+            6) cmd_login ;;
+            7) cmd_cli ;;
+            8) cmd_logs; printf '\n' ;;
+            9) cmd_edit "$COMPOSE_FILE" ;;
+            10) cmd_edit "$ENV_FILE" ;;
+            11) cmd_status ;;
             0) printf 'Bye.\n'; return 0 ;;
             *) log_warn "Invalid choice: $choice" ;;
         esac
@@ -959,6 +1014,7 @@ Commands:
   up             docker compose up -d
   down           docker compose down
   restart        docker compose restart
+  login          Interactive Telegram login + service restart (one-shot)
   cli [args...]  Passthrough to the in-container Python CLI (e.g. \`cli tglogin\`,
                  \`cli status\`). \`cli\` with no args prints the Python CLI menu.
   logs           docker compose logs -f
@@ -992,6 +1048,7 @@ main() {
         up)             shift; cmd_up "$@" ;;
         down)           shift; cmd_down "$@" ;;
         restart)        shift; cmd_restart "$@" ;;
+        login)          shift; cmd_login "$@" ;;
         cli)            shift; cmd_cli "$@" ;;
         logs)           shift; cmd_logs "$@" ;;
         update)         shift; cmd_update "$@" ;;

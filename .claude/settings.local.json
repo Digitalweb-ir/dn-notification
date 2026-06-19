@@ -112,7 +112,8 @@
       "Bash(.venv/bin/python -c ' *)",
       "Bash(.venv/bin/python -c \"from app.main import app; from app.telegram_client import TelegramService; from app.cli import app as cli; print\\('OK'\\)\")",
       "Bash(.venv/bin/pytest tests/ -q)",
-      "Bash(.venv/bin/python *)"
+      "Bash(.venv/bin/python *)",
+      "Bash(brew list *)"
     ]
   }
 }
