@@ -1,5 +1,7 @@
+"""FastAPI entry point for the dn-notification service."""
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -29,7 +31,7 @@ logger = get_logger("main")
 # trip the unauthenticated branch.
 _TG_LOGIN_HINT = (
     "Telegram session is not available. "
-    "Run `dnnotification cli tglogin` to sign in."
+    "Run `dnnotification login` to sign in."
 )
 
 
@@ -170,3 +172,76 @@ async def search(req: SearchRequest, request: Request) -> SearchResponse:
 async def send_voice(req: SendVoiceRequest, request: Request) -> SendVoiceResponse:
     svc: VoiceService = request.app.state.voice
     return await svc.send(req.chat_id, req.template)
+
+
+# --------------------------------------------------------------------- admin
+
+
+@app.post(
+    "/admin/handoff",
+    dependencies=[Depends(_require_api_key)],
+)
+async def admin_handoff(request: Request) -> JSONResponse:
+    """Reload the TelegramService singleton from the on-disk .session.
+
+    The CLI's ``tglogin`` command runs in a separate process and owns
+    its own ``TelegramClient``. After it completes sign-in, the
+    authorized auth_key is on disk under ``$DATA_DIR/session/`` but
+    the running service's in-memory client — built at startup when no
+    session existed — is stale. The CLI POSTs here, and we stop the
+    stale client and start a fresh one that loads the auth_key from
+    the same file. Because the CLI's sign_in authorized the auth_key
+    server-side, the new client's ``is_user_authorized()`` returns
+    True and endpoints like ``/search`` stop returning 503.
+
+    The ``_lock`` on ``TelegramService`` already serializes start()
+    and stop(), so the handoff is naturally race-free against
+    concurrent requests.
+
+    Idempotent: a second handoff when already connected is a no-op.
+    """
+    telegram: TelegramService = request.app.state.telegram
+    if telegram.is_connected:
+        return JSONResponse(
+            status_code=200,
+            content={"ok": True, "already_connected": True},
+        )
+
+    try:
+        await telegram.stop()
+        await telegram.start()
+    except Exception as exc:  # noqa: BLE001
+        # The handoff is best-effort: the on-disk .session is still
+        # valid even if we can't reach Telegram from the running
+        # process right now (network blip, etc.). The next container
+        # restart will pick it up. Surface the error so the CLI can
+        # log a clear hint instead of silently failing.
+        logger.exception("Handoff failed: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": str(exc)},
+        )
+
+    if not telegram.is_connected:
+        # start() returned without raising, but the on-disk session
+        # wasn't authorized (e.g. another process is in the middle of
+        # writing the auth_key). Tell the CLI to retry.
+        return JSONResponse(
+            status_code=503,
+            content={
+                "ok": False,
+                "error": "Service is still disconnected after reload. "
+                "The on-disk session may be incomplete; re-run "
+                "`dnnotification login`.",
+            },
+        )
+
+    me = await telegram.require_client().get_me()
+    logger.info(
+        "Handoff complete — service is now authorized as %s",
+        getattr(me, "username", None) or getattr(me, "first_name", "?"),
+    )
+    return JSONResponse(
+        status_code=200,
+        content={"ok": True, "already_connected": False},
+    )

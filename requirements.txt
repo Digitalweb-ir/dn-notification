@@ -5,6 +5,11 @@ pydantic==2.9.2
 pydantic-settings==2.5.2
 python-dotenv==1.0.1
 python-multipart==0.0.10
+# httpx is the HTTP client used by the in-container CLI
+# (`app.cli.tglogin`) to POST to the running service's
+# `/admin/handoff` endpoint so the new auth_key is loaded
+# without a container restart.
+httpx==0.28.1
 # typer is the operator CLI (`python -m dnapp login`). Click 8.4.x
 # removed the `ctx` positional arg from `Parameter.make_metavar()`,
 # which crashes Typer 0.12.5's help renderer; pin to the last 8.1.x

@@ -75,7 +75,7 @@ def test_status_reports_no_session_file(cli_runner, monkeypatch, tmp_path):
     result = cli_runner.invoke(cli_app, ["status"], catch_exceptions=False)
     assert result.exit_code == 1
     assert "NO SESSION" in result.output
-    assert "dnnotification cli tglogin" in result.output
+    assert "dnnotification login" in result.output
 
 
 def test_status_reports_authorized_when_connected(cli_runner, fake_service):
@@ -94,4 +94,4 @@ def test_status_reports_invalid_when_disconnected(cli_runner, fake_service):
     result = cli_runner.invoke(cli_app, ["status"], catch_exceptions=False)
     assert result.exit_code == 1
     assert "SESSION INVALID" in result.output
-    assert "dnnotification cli tglogin" in result.output
+    assert "dnnotification login" in result.output

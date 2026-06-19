@@ -11,9 +11,11 @@ Usage (inside the container)::
     python -m app.cli tglogin
     python -m app.cli status
 
-From the host, ``dnnotification cli tglogin`` is a thin wrapper that
-runs this CLI via ``docker exec`` and (for ``tglogin``) restarts the
-service so the newly-written ``.session`` file is picked up.
+From the host, ``dnnotification login`` is a thin wrapper that runs
+this CLI via ``docker exec`` and (for ``tglogin``) drives the
+interactive login in the same process as the running service via a
+``POST /admin/handoff`` so the running service picks up the new
+session without a container restart.
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ import getpass
 import sys
 from datetime import datetime, timezone
 
+import httpx
 import typer
 from telethon.tl.types import User
 
@@ -36,6 +39,12 @@ app = typer.Typer(
     add_completion=False,
 )
 
+# Address of the running FastAPI process inside the container. The
+# CLI and the server share the same container, so loopback works
+# without going through the host's port mapping. The port mirrors
+# docker-compose.yaml's service port.
+_SERVICE_BASE_URL = "http://127.0.0.1:8000"
+
 
 def _build_service() -> TelegramService:
     """Return a fresh TelegramService wired to the current env/.env.
@@ -46,6 +55,52 @@ def _build_service() -> TelegramService:
     pin a stale connection in memory.
     """
     return TelegramService(get_settings())
+
+
+async def _handoff_to_running_service(api_key: str) -> tuple[bool, str]:
+    """Tell the running FastAPI service to reload from the on-disk session.
+
+    The CLI's sign-in writes a fresh auth_key to the bind-mounted
+    .session file. The running service has its own in-memory client
+    built at startup that is now stale. POSTing to ``/admin/handoff``
+    tells it to stop the stale client and start a new one that
+    loads the authorized auth_key from disk.
+
+    Returns ``(success, message)`` — on success the running service
+    is live and ``/search``/``/send-voice`` will return real results;
+    on failure the on-disk session is still valid and ``dnnotification
+    restart`` will pick it up.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{_SERVICE_BASE_URL}/admin/handoff",
+                headers={"X-API-KEY": api_key},
+            )
+    except httpx.HTTPError as exc:
+        return False, (
+            f"Could not reach the running service at {_SERVICE_BASE_URL} "
+            f"({exc.__class__.__name__}: {exc}). The on-disk session is "
+            f"still valid — run `dnnotification restart` to load it."
+        )
+
+    if response.status_code == 200:
+        body = response.json()
+        if body.get("already_connected"):
+            return True, "Service was already connected."
+        return True, "Service is now connected."
+
+    # Surface the server's error verbatim so the operator can act on it.
+    try:
+        body = response.json()
+        error = body.get("error") or body.get("detail") or response.text
+    except Exception:
+        error = response.text
+    return False, (
+        f"Handoff returned HTTP {response.status_code}: {error}. "
+        f"The on-disk session is still valid — run `dnnotification restart` "
+        f"to load it."
+    )
 
 
 def _prompt_code() -> str | None:
@@ -83,17 +138,23 @@ def _prompt_password() -> str | None:
 
 @app.command()
 def tglogin() -> None:
-    """Sign in to Telegram interactively and write a persistent .session file.
+    """Sign in to Telegram interactively and hand off to the running service.
 
     On success the .session file is written to the host bind-mount
-    (``$DATA_DIR/session/<name>.session``). The container should be
-    restarted afterwards — the running service has its own in-memory
-    Telethon client which was built before the session existed. The
-    host-side ``dnnotification cli tglogin`` command does the restart
-    for you.
+    (``$DATA_DIR/session/<name>.session``) and the running FastAPI
+    service is told (via ``POST /admin/handoff``) to reload its
+    in-memory client against the new auth_key. Endpoints like
+    ``/search`` and ``/send-voice`` become live immediately — no
+    container restart needed.
+
+    The CLI owns its own short-lived ``TelegramClient`` for the
+    duration of the sign-in. The "Disconnecting Telegram client"
+    line at the end is the CLI's client being torn down after the
+    handoff; it is expected and does not mean the session is lost.
     """
     setup_logging()
     service = _build_service()
+    api_key = get_settings().api_key
 
     async def _run() -> int:
         typer.echo(
@@ -105,18 +166,33 @@ def tglogin() -> None:
                 code_prompt=_prompt_code,
                 password_prompt=_prompt_password,
             )
-            # start() already verified get_me() internally and logged
-            # the user; fetch it again here so the operator sees it on
-            # stdout, then disconnect.
             me = await service.require_client().get_me()
             if isinstance(me, User):
                 display = getattr(me, "username", None) or me.first_name or "?"
                 typer.echo(
                     f"Login successful — signed in as {display} "
-                    f"(id={me.id}, phone={me.phone})."
+                    f"(id={me.id}, phone={me.phone}).",
+                    err=True,
                 )
             else:
-                typer.echo("Login successful.")
+                typer.echo("Login successful.", err=True)
+
+            # Hand off the new auth_key to the running service
+            # BEFORE we disconnect our own client. This is the step
+            # that makes the new session "stick" — the running
+            # service's stale client (built at startup when no
+            # session existed) is stopped, a fresh one is started
+            # that loads the auth_key from disk, and ``is_connected``
+            # flips to True. Endpoints stop returning 503.
+            ok, message = await _handoff_to_running_service(api_key)
+            if ok:
+                typer.echo(message, err=True)
+                typer.echo(
+                    "Session is live — /search and /send-voice are ready.",
+                    err=True,
+                )
+            else:
+                typer.echo(f"Warning: {message}", err=True)
         except KeyboardInterrupt:
             typer.echo("Aborted by user.", err=True)
             return 130
@@ -124,6 +200,11 @@ def tglogin() -> None:
             typer.echo(f"Login failed: {exc}", err=True)
             return 1
         finally:
+            # Always stop the CLI's client. This produces the
+            # "Disconnecting Telegram client" log line — it is the
+            # CLI's client being torn down, NOT the running
+            # service's. The running service's client is owned by
+            # the FastAPI process and lives until container stop.
             await service.stop()
         return 0
 
@@ -143,7 +224,7 @@ def status() -> None:
     typer.echo(f"Session file: {session_path}")
 
     if not session_path.exists():
-        typer.echo("Status: NO SESSION — run `dnnotification cli tglogin` first.", err=True)
+        typer.echo("Status: NO SESSION — run `dnnotification login` first.", err=True)
         raise typer.Exit(code=1)
 
     mtime = datetime.fromtimestamp(session_path.stat().st_mtime, tz=timezone.utc)
@@ -172,7 +253,7 @@ def status() -> None:
         if not service.is_connected:
             typer.echo(
                 "Status: SESSION INVALID — no authorized session "
-                "(run `dnnotification cli tglogin` to sign in).",
+                "(run `dnnotification login` to sign in).",
                 err=True,
             )
             return 1
