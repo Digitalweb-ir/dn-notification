@@ -78,8 +78,16 @@ def _make_client_mock(*, code_behavior, password_behavior, is_authorized=False):
     client.get_me = AsyncMock(return_value=me)
 
     async def sign_in(*args, code=None, password=None, **kwargs):
+        # Telethon's sign_in is overloaded:
+        #   * sign_in(phone, code)         — first-factor OTP
+        #   * sign_in(password=password)   — 2FA
+        # Both forms are positional for the OTP path. Detect by
+        # ``password`` first (kwarg-only), then fall back to the
+        # second positional arg as the code.
         if password is not None:
             return await password_behavior(password)
+        if len(args) >= 2:
+            return await code_behavior(args[1])
         return await code_behavior(code)
 
     client.sign_in = AsyncMock(side_effect=sign_in)
@@ -413,4 +421,90 @@ async def test_start_succeeds_when_session_already_authorized(
 
     await svc.start()
 
+    assert svc.is_connected is True
+
+
+@pytest.mark.asyncio
+async def test_start_runs_login_flow_when_caller_passes_prompts(
+    tmp_path, monkeypatch
+):
+    """Regression: ``dnnotification cli tglogin`` (and any caller
+    that passes ``code_prompt=``) must ALWAYS enter the login flow,
+    even when ``TG_CODE`` is unset. The previous version of the
+    disconnected-mode check only looked at the env-var fallback, so
+    the CLI's prompts were ignored and ``start()`` returned
+    silently with no authentication — exactly the bug that
+    prompted this test.
+
+    With the fix, ``send_code_request`` and ``sign_in`` MUST be
+    invoked when the caller supplied a ``code_prompt``.
+    """
+    monkeypatch.delenv("TG_CODE", raising=False)
+    monkeypatch.delenv("TG_2FA_PASSWORD", raising=False)
+    svc = _build_service(tmp_path, monkeypatch)
+
+    sign_in_calls: list[str] = []
+    send_code_calls = 0
+
+    async def password_behavior(password):
+        sign_in_calls.append(f"pwd:{password}")
+        return None  # success
+
+    async def code_behavior(code):
+        sign_in_calls.append(f"code:{code}")
+        return None  # success — no 2FA in this scenario
+
+    fake = _FakeTelegramClient.__new__(_FakeTelegramClient)
+    fake._mock = AsyncMock()
+    fake._mock.connect = AsyncMock(return_value=True)
+    fake._mock.is_user_authorized = AsyncMock(return_value=False)
+
+    async def send_code_request(phone):
+        nonlocal send_code_calls
+        send_code_calls += 1
+        return True
+
+    fake._mock.send_code_request = AsyncMock(side_effect=send_code_request)
+    fake._mock.disconnect = AsyncMock(return_value=True)
+
+    async def sign_in(*args, code=None, password=None, **kwargs):
+        # Telethon's sign_in is overloaded:
+        #   * sign_in(phone, code)         — first-factor OTP
+        #   * sign_in(password=password)   — 2FA
+        # Both forms are positional for the OTP path. Detect by
+        # ``password`` first (kwarg-only), then fall back to the
+        # second positional arg as the code.
+        if password is not None:
+            return await password_behavior(password)
+        if len(args) >= 2:
+            return await code_behavior(args[1])
+        return await code_behavior(code)
+
+    fake._mock.sign_in = AsyncMock(side_effect=sign_in)
+    me = MagicMock(
+        spec=TgUser,
+        id=999, first_name="Tester", username="tester", phone="+15555550100"
+    )
+    fake._mock.get_me = AsyncMock(return_value=me)
+
+    import app.telegram_client as tc_mod
+    instances = [fake]
+
+    class _Queue:
+        def __call__(self, *args, **kwargs):
+            return instances.pop(0)
+
+    monkeypatch.setattr(tc_mod, "TelegramClient", _Queue())
+
+    # Pass interactive prompts — this is what the CLI does.
+    await svc.start(
+        code_prompt=lambda: "11111",
+        password_prompt=lambda: "secret",
+    )
+
+    # The login flow must have actually run.
+    assert send_code_calls == 1, "send_code_request was not called"
+    assert sign_in_calls == ["code:11111"], (
+        f"expected exactly one code sign_in, got {sign_in_calls}"
+    )
     assert svc.is_connected is True

@@ -136,6 +136,13 @@ class TelegramService:
                 # ``is_connected`` and return 503 with an actionable
                 # message; the operator can sign in at any time
                 # without restarting the container.
+                #
+                # IMPORTANT: the disconnected-mode branch must NOT
+                # fire when the caller passed a ``code_prompt`` (the
+                # interactive CLI or a test). Otherwise `tglogin`
+                # would skip the OTP step and report "Login
+                # successful" without ever authenticating — exactly
+                # the regression this check was added to fix.
                 env_code = code_prompt is None
                 env_pwd = password_prompt is None
                 if env_code:
@@ -143,8 +150,7 @@ class TelegramService:
                 if env_pwd:
                     password_prompt = _env_prompt("TG_2FA_PASSWORD")
 
-                code_env = os.getenv("TG_CODE")
-                if code_env in (None, ""):
+                if env_code and os.getenv("TG_CODE") in (None, ""):
                     logger.warning(
                         "No Telegram session and no TG_CODE env var set. "
                         "The service is starting in disconnected mode — "
@@ -153,15 +159,17 @@ class TelegramService:
                     )
                     return
 
-                # We have at least the OTP. Try to log in. If the
-                # account turns out to have 2FA enabled but the env
-                # var is missing, the prompt loop below will raise
-                # with a clear hint — which the lifespan used to let
-                # crash the container. Catch that specific case and
-                # degrade to disconnected mode instead. Other
-                # RuntimeErrors (wrong code, wrong password after
-                # multiple attempts) are legitimate failures and
-                # still propagate.
+                # We have at least one way to authenticate — either
+                # the env-var fallback has a value, or the caller
+                # passed an interactive ``code_prompt``. Try the
+                # login. If the account turns out to have 2FA enabled
+                # but the env var is missing AND the caller did not
+                # pass a password prompt either, the prompt loop
+                # below will raise with a clear hint. Catch that
+                # specific case and degrade to disconnected mode
+                # (the lifespan path). Other RuntimeErrors (wrong
+                # code, wrong password after multiple attempts) are
+                # legitimate failures and still propagate.
                 try:
                     await self._interactive_login(
                         code_prompt=code_prompt,
@@ -170,7 +178,18 @@ class TelegramService:
                         password_max_attempts=_ENV_PROMPT_MAX_ATTEMPTS if env_pwd else max_attempts,
                     )
                 except RuntimeError as exc:
-                    if env_pwd and "2FA" in str(exc) and os.getenv("TG_2FA_PASSWORD") in (None, ""):
+                    # Only translate the "2FA required but unavailable"
+                    # error into disconnected mode when this is the
+                    # lifespan path. The interactive CLI passes a
+                    # password prompt, so this branch is unreachable
+                    # there — a 2FA-required error means the operator
+                    # pressed Enter on an empty password, which is a
+                    # legitimate abort and should propagate.
+                    if (
+                        env_pwd
+                        and "2FA" in str(exc)
+                        and os.getenv("TG_2FA_PASSWORD") in (None, "")
+                    ):
                         logger.warning(
                             "Account has 2FA enabled but TG_2FA_PASSWORD is not set. "
                             "The service is starting in disconnected mode — "
