@@ -23,6 +23,16 @@ from .voice_service import VoiceService, VoiceServiceError
 logger = get_logger("main")
 
 
+# Message returned by every endpoint that needs an authorized Telegram
+# session. Centralised so the operator-facing text stays consistent —
+# the wording is the only actionable hint the user gets when they
+# trip the unauthenticated branch.
+_TG_LOGIN_HINT = (
+    "Telegram session is not available. "
+    "Run `dnnotification cli tglogin` to sign in."
+)
+
+
 # --------------------------------------------------------------------- auth
 
 
@@ -32,6 +42,24 @@ def _require_api_key(x_api_key: str | None = Header(default=None, alias="X-API-K
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing X-API-KEY header",
+        )
+
+
+def _require_telegram_session(request: Request) -> None:
+    """Refuse endpoints that need an authorized Telegram session.
+
+    The lifespan starts the service in disconnected mode when no
+    session file is on disk (so the container does not crash-loop and
+    the operator can still run `dnnotification cli tglogin`). This
+    dependency translates that state into a 503 with an actionable
+    hint, instead of letting the underlying Telethon call surface an
+    opaque auth error.
+    """
+    telegram: TelegramService = request.app.state.telegram
+    if not telegram.is_connected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_TG_LOGIN_HINT,
         )
 
 
@@ -50,15 +78,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     search = SearchService(settings, telegram)
     voice = VoiceService(settings, telegram)
 
-    # Warm the dialog cache in the background so the first request is fast.
-    async def _warm() -> None:
-        try:
-            await search.refresh_dialogs(force=True)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Initial dialog warm-up failed: %s", e)
+    # Warm the dialog cache in the background so the first request is
+    # fast. Skip when the lifespan started in disconnected mode (no
+    # authorized session) — ``refresh_dialogs`` would just fail, and
+    # ``require_client`` would raise on the empty client state. The
+    # warm task will be a no-op until ``tglogin`` is run; the search
+    # endpoint already returns 503 in that case, so warming is moot.
+    app.state.warm_task = None
+    if telegram.is_connected:
 
-    import asyncio
-    app.state.warm_task = asyncio.create_task(_warm())
+        async def _warm() -> None:
+            try:
+                await search.refresh_dialogs(force=True)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Initial dialog warm-up failed: %s", e)
+
+        import asyncio
+        app.state.warm_task = asyncio.create_task(_warm())
 
     app.state.telegram = telegram
     app.state.search = search
@@ -112,7 +148,10 @@ async def health() -> HealthResponse:
 @app.post(
     "/search",
     response_model=SearchResponse,
-    dependencies=[Depends(_require_api_key)],
+    dependencies=[
+        Depends(_require_api_key),
+        Depends(_require_telegram_session),
+    ],
 )
 async def search(req: SearchRequest, request: Request) -> SearchResponse:
     svc: SearchService = request.app.state.search
@@ -123,7 +162,10 @@ async def search(req: SearchRequest, request: Request) -> SearchResponse:
 @app.post(
     "/send-voice",
     response_model=SendVoiceResponse,
-    dependencies=[Depends(_require_api_key)],
+    dependencies=[
+        Depends(_require_api_key),
+        Depends(_require_telegram_session),
+    ],
 )
 async def send_voice(req: SendVoiceRequest, request: Request) -> SendVoiceResponse:
     svc: VoiceService = request.app.state.voice

@@ -554,26 +554,27 @@ cmd_install() {
         return 0
     fi
 
-    # If no Telegram session file exists yet, do NOT bring the
-    # service up: the FastAPI lifespan would fail on first boot
-    # (Telethon needs a .session file that does not exist yet) and
-    # the container would crash-loop. Instead, point the operator at
-    # `dnnotification cli tglogin`, which writes the .session to the
-    # host bind-mount and then brings the service up cleanly.
-    if ! ls "$SESSION_DIR"/*.session >/dev/null 2>&1; then
-        log_warn "No Telegram session found under $SESSION_DIR."
-        log_warn "Skipping 'docker compose up' — the service cannot start"
-        log_warn "without a session file. Sign in with:"
-        log_warn "    sudo $SCRIPT_NAME cli tglogin"
-        log_warn "and the service will be started automatically once the"
-        log_warn "session is on disk."
-        return 0
-    fi
-
+    # Always bring the service up regardless of session state. The
+    # FastAPI lifespan is designed to start in disconnected mode when
+    # no .session file is on disk: it logs a warning, leaves the
+    # Telethon client constructed-but-unauthorized, and the
+    # `/search` and `/send-voice` endpoints return 503 with a hint
+    # pointing at `dnnotification cli tglogin`. The container must
+    # be running for the operator to invoke that command, so a
+    # session gate here would defeat the whole flow.
     log_info "Pulling image and starting services…"
     compose pull
     compose up -d
     cmd_status
+
+    if ! ls "$SESSION_DIR"/*.session >/dev/null 2>&1; then
+        printf '\n'
+        log_info "No Telegram session under $SESSION_DIR — the service is up"
+        log_info "but endpoints that need a session will return 503. Sign in with:"
+        log_info "    sudo $SCRIPT_NAME cli tglogin"
+        log_info "and the running container will pick up the new session on its"
+        log_info "next restart (or use '$SCRIPT_NAME restart' to pick it up now)."
+    fi
 }
 
 cmd_install_cli() {
@@ -640,9 +641,10 @@ cmd_cli() {
     [[ -f "$COMPOSE_FILE" ]] || die "No compose file at $COMPOSE_FILE — run '$SCRIPT_NAME install' first."
 
     # If the container is not running, `docker exec` has no target.
-    # Try to start it once. The lifespan may fail (e.g. no .session
-    # yet) and the container will be in a "restarting" state, which
-    # is enough for `docker exec` to attach.
+    # Try to start it once. The lifespan is tolerant of a missing
+    # .session file — it logs a warning and leaves the service in
+    # disconnected mode — so the container stays up and `docker exec`
+    # can attach.
     if ! container_is_running; then
         log_info "Container is not running — starting it so the CLI exec target exists…"
         compose up -d >/dev/null 2>&1 || true

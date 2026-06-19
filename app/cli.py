@@ -155,8 +155,12 @@ def status() -> None:
         # Calling start() with no prompts triggers the env-var path.
         # If the session is already authorized, start() returns
         # immediately without prompting (the is_user_authorized()
-        # fast path inside start()). If the session is missing or
-        # invalid, start() raises — which is the right signal here.
+        # fast path inside start()) and sets ``is_connected=True``.
+        #
+        # If the session is missing or invalid, ``start()`` no longer
+        # raises: it now falls back to "disconnected mode" so the
+        # FastAPI lifespan does not crash-loop. We therefore check
+        # ``is_connected`` ourselves to decide what to report.
         try:
             await service.start()
         except RuntimeError as exc:
@@ -164,6 +168,14 @@ def status() -> None:
             return 1
         finally:
             await service.stop()
+
+        if not service.is_connected:
+            typer.echo(
+                "Status: SESSION INVALID — no authorized session "
+                "(run `dnnotification cli tglogin` to sign in).",
+                err=True,
+            )
+            return 1
 
         typer.echo("Status: AUTHORIZED")
         return 0

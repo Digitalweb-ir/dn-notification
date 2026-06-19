@@ -105,7 +105,11 @@
       "Bash(.venv/bin/pytest tests/test_tglogin_2fa.py -x -v)",
       "Bash(.venv/bin/pytest tests/test_tglogin_2fa.py -x -v --rootdir=.)",
       "Bash(.venv/bin/pytest tests/test_tglogin_2fa.py -v)",
-      "Bash(.venv/bin/pytest tests/test_tglogin_2fa.py -v --timeout=30)"
+      "Bash(.venv/bin/pytest tests/test_tglogin_2fa.py -v --timeout=30)",
+      "Bash(.venv/bin/python -c \"from app.main import app; print\\('app OK'\\); from app.telegram_client import TelegramService; print\\('telegram OK'\\)\")",
+      "Bash(.venv/bin/pytest tests/test_endpoints_session_required.py -v)",
+      "Bash(.venv/bin/pytest tests/ -v)",
+      "Bash(.venv/bin/python -c ' *)"
     ]
   }
 }

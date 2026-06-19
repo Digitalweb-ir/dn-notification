@@ -123,45 +123,62 @@ class TelegramService:
             await self.client.connect()
 
             if not await self.client.is_user_authorized():
-                # Caller did not pass prompts -> fall back to the env-var
-                # path. This is what the lifespan uses: it cannot prompt
-                # interactively, so the only way to log in is via
-                # TG_CODE/TG_2FA_PASSWORD. The error message points the
-                # operator at the proper fix: run
-                # `dnnotification cli tglogin`.
-                #
-                # Track whether the env-var fallback fired for *each*
-                # prompt separately, so the cap can apply only to the
-                # env-var path. The interactive path never caps (the
-                # user can keep typing until they get it right or
-                # Ctrl-C).
+                # Decide whether we have any way to authenticate. If
+                # neither the caller passed prompts nor the env-var
+                # fallback is populated, do NOT raise: the FastAPI
+                # lifespan would crash, the container would
+                # restart-loop, and the operator would lose the
+                # ability to run `dnnotification cli tglogin` against
+                # the running container. Instead, leave the client
+                # connected-but-unauthorized, log a clear warning, and
+                # return. The endpoints that need an authorized
+                # session (`/search`, `/send-voice`) check
+                # ``is_connected`` and return 503 with an actionable
+                # message; the operator can sign in at any time
+                # without restarting the container.
                 env_code = code_prompt is None
                 env_pwd = password_prompt is None
                 if env_code:
                     code_prompt = _env_prompt("TG_CODE")
-                    if os.getenv("TG_CODE") in (None, ""):
-                        # Fail loudly *before* the loop so the operator
-                        # sees a clear actionable error instead of an
-                        # infinite "empty code, retry" loop.
-                        raise RuntimeError(
-                            "First-time login required. Run `dnnotification cli tglogin` "
-                            "from the host (or, for scripted login, set TG_CODE and "
-                            "TG_2FA_PASSWORD in the container env)."
-                        )
                 if env_pwd:
                     password_prompt = _env_prompt("TG_2FA_PASSWORD")
-                    # TG_2FA_PASSWORD is only required when the account
-                    # actually has 2FA enabled, which we can't know
-                    # until after the OTP step. An unset env var here
-                    # is therefore legal — it only becomes an error if
-                    # 2FA turns out to be on (handled in
-                    # `_interactive_login`).
-                await self._interactive_login(
-                    code_prompt=code_prompt,
-                    password_prompt=password_prompt,
-                    code_max_attempts=_ENV_PROMPT_MAX_ATTEMPTS if env_code else max_attempts,
-                    password_max_attempts=_ENV_PROMPT_MAX_ATTEMPTS if env_pwd else max_attempts,
-                )
+
+                code_env = os.getenv("TG_CODE")
+                if code_env in (None, ""):
+                    logger.warning(
+                        "No Telegram session and no TG_CODE env var set. "
+                        "The service is starting in disconnected mode — "
+                        "endpoints that require a session will return 503. "
+                        "Run `dnnotification cli tglogin` to sign in."
+                    )
+                    return
+
+                # We have at least the OTP. Try to log in. If the
+                # account turns out to have 2FA enabled but the env
+                # var is missing, the prompt loop below will raise
+                # with a clear hint — which the lifespan used to let
+                # crash the container. Catch that specific case and
+                # degrade to disconnected mode instead. Other
+                # RuntimeErrors (wrong code, wrong password after
+                # multiple attempts) are legitimate failures and
+                # still propagate.
+                try:
+                    await self._interactive_login(
+                        code_prompt=code_prompt,
+                        password_prompt=password_prompt,
+                        code_max_attempts=_ENV_PROMPT_MAX_ATTEMPTS if env_code else max_attempts,
+                        password_max_attempts=_ENV_PROMPT_MAX_ATTEMPTS if env_pwd else max_attempts,
+                    )
+                except RuntimeError as exc:
+                    if env_pwd and "2FA" in str(exc) and os.getenv("TG_2FA_PASSWORD") in (None, ""):
+                        logger.warning(
+                            "Account has 2FA enabled but TG_2FA_PASSWORD is not set. "
+                            "The service is starting in disconnected mode — "
+                            "endpoints that require a session will return 503. "
+                            "Run `dnnotification cli tglogin` to sign in."
+                        )
+                        return
+                    raise
 
             me = await self.client.get_me()
             if not isinstance(me, User):
