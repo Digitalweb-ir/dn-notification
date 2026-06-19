@@ -86,7 +86,26 @@
       "Bash(PYTHONPATH=/Users/erfan/Projects/dn-deactive-notification /tmp/.cli-venv/bin/python -m app.cli --help)",
       "Bash(PYTHONPATH=/Users/erfan/Projects/dn-deactive-notification /tmp/.cli-venv/bin/python -m app.cli tglogin --help)",
       "Bash(PYTHONPATH=/Users/erfan/Projects/dn-deactive-notification /tmp/.cli-venv/bin/python -m app.cli status --help)",
-      "Bash(PYTHONPATH=/Users/erfan/Projects/dn-deactive-notification /tmp/.cli-venv/bin/python -m app.cli status)"
+      "Bash(PYTHONPATH=/Users/erfan/Projects/dn-deactive-notification /tmp/.cli-venv/bin/python -m app.cli status)",
+      "Bash(python3 -c \"import sys; sys.path.insert\\(0,'/tmp/.cli-venv/lib/python3.12/site-packages'\\); from telethon.errors import PasswordHashInvalidError, SrpIdInvalidError; print\\('OK', PasswordHashInvalidError.__name__, SrpIdInvalidError.__name__\\)\")",
+      "Bash(python3 -c \"import sys; sys.path.insert\\(0,'/tmp/.cli-venv/lib/python3.12/site-packages'\\); from telethon.errors import PasswordHashInvalidError, SrpIdInvalidError; print\\('OK:', PasswordHashInvalidError.__name__, SrpIdInvalidError.__name__\\)\")",
+      "Bash(python3 -m venv /tmp/.cli-venv2)",
+      "Bash(/tmp/.cli-venv2/bin/pip install *)",
+      "Bash(/tmp/.cli-venv2/bin/python -c \"from telethon.errors import PasswordHashInvalidError, SrpIdInvalidError; print\\('OK:', PasswordHashInvalidError.__name__, SrpIdInvalidError.__name__\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/Users/erfan/Projects/dn-deactive-notification/app/cli.py'\\).read\\(\\)\\); ast.parse\\(open\\('/Users/erfan/Projects/dn-deactive-notification/app/telegram_client.py'\\).read\\(\\)\\); print\\('python syntax OK'\\)\")",
+      "Bash(python3 -m venv /tmp/.test-venv)",
+      "Bash(/tmp/.test-venv/bin/pip install *)",
+      "Bash(PYTHONPATH=/Users/erfan/Projects/dn-deactive-notification /tmp/.test-venv/bin/python /tmp/test_2fa_fix.py)",
+      "Bash(python *)",
+      "Bash(.venv/bin/python -c \"import pytest; print\\(pytest.__version__\\)\")",
+      "Bash(.venv/bin/pip install *)",
+      "Bash(.venv/bin/pip list *)",
+      "Bash(.venv/bin/pip show *)",
+      "Bash(.venv/bin/python -c \"from app.cli import _prompt_password\")",
+      "Bash(.venv/bin/pytest tests/test_tglogin_2fa.py -x -v)",
+      "Bash(.venv/bin/pytest tests/test_tglogin_2fa.py -x -v --rootdir=.)",
+      "Bash(.venv/bin/pytest tests/test_tglogin_2fa.py -v)",
+      "Bash(.venv/bin/pytest tests/test_tglogin_2fa.py -v --timeout=30)"
     ]
   }
 }

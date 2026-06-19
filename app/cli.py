@@ -49,7 +49,11 @@ def _build_service() -> TelegramService:
 
 
 def _prompt_code() -> str | None:
-    """Prompt the user for the SMS code. Empty input aborts the prompt loop."""
+    """Prompt the user for the SMS code. Empty input aborts the prompt loop.
+
+    The SMS code is digits-only, so trimming surrounding whitespace is
+    safe and protects against stray newlines from copy-paste.
+    """
     try:
         value = getpass.getpass("Telegram login code (empty to abort): ")
     except (EOFError, KeyboardInterrupt):
@@ -59,13 +63,22 @@ def _prompt_code() -> str | None:
 
 
 def _prompt_password() -> str | None:
-    """Prompt the user for the 2FA cloud password."""
+    """Prompt the user for the 2FA cloud password.
+
+    CRITICAL: do NOT strip the value. Telegram 2FA cloud passwords
+    are user-defined and may legitimately contain leading/trailing
+    whitespace, which is hashed into the stored password. Stripping
+    the input produces a wrong hash and Telethon rejects it with
+    ``PasswordHashInvalidError`` even when the user is sure the
+    password is correct. The value is returned verbatim (an empty
+    string is mapped to None so the caller can treat it as "abort").
+    """
     try:
         value = getpass.getpass("2FA cloud password (empty to abort): ")
     except (EOFError, KeyboardInterrupt):
         print("")
         raise
-    return value.strip() or None
+    return value if value else None
 
 
 @app.command()

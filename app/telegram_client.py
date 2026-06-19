@@ -3,15 +3,17 @@ from __future__ import annotations
 import asyncio
 import os
 from contextlib import asynccontextmanager
-from typing import Awaitable, Callable, Optional
+from typing import Callable, Optional
 
 from telethon import TelegramClient
 from telethon.errors import (
     ApiIdInvalidError,
     FloodWaitError,
+    PasswordHashInvalidError,
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
     SessionPasswordNeededError,
+    SrpIdInvalidError,
 )
 from telethon.tl.types import User
 
@@ -57,6 +59,7 @@ class TelegramService:
         *,
         code_prompt: Optional[PromptFn] = None,
         password_prompt: Optional[PromptFn] = None,
+        max_attempts: Optional[int] = None,
     ) -> None:
         """Initialize the client and authenticate (interactive on first run).
 
@@ -64,6 +67,14 @@ class TelegramService:
         that return the login code and 2FA password respectively. They
         default to reading ``TG_CODE`` / ``TG_2FA_PASSWORD`` from the
         environment, which preserves the original scripted-login flow.
+
+        ``max_attempts`` caps how many times each prompt is allowed to
+        return an invalid value before the call gives up with a clear
+        error. ``None`` (the default) means unlimited — the interactive
+        CLI uses this so the user can keep typing until they get it
+        right (or hit Ctrl-C). The env-var fallback path passes
+        :data:`_ENV_PROMPT_MAX_ATTEMPTS` so a stale or wrong env var
+        cannot hang the lifespan forever.
 
         The interactive CLI (``python -m app.cli tglogin``) passes callbacks
         built on top of :func:`getpass.getpass` so the code is never
@@ -118,13 +129,38 @@ class TelegramService:
                 # TG_CODE/TG_2FA_PASSWORD. The error message points the
                 # operator at the proper fix: run
                 # `dnnotification cli tglogin`.
-                if code_prompt is None:
+                #
+                # Track whether the env-var fallback fired for *each*
+                # prompt separately, so the cap can apply only to the
+                # env-var path. The interactive path never caps (the
+                # user can keep typing until they get it right or
+                # Ctrl-C).
+                env_code = code_prompt is None
+                env_pwd = password_prompt is None
+                if env_code:
                     code_prompt = _env_prompt("TG_CODE")
-                if password_prompt is None:
+                    if os.getenv("TG_CODE") in (None, ""):
+                        # Fail loudly *before* the loop so the operator
+                        # sees a clear actionable error instead of an
+                        # infinite "empty code, retry" loop.
+                        raise RuntimeError(
+                            "First-time login required. Run `dnnotification cli tglogin` "
+                            "from the host (or, for scripted login, set TG_CODE and "
+                            "TG_2FA_PASSWORD in the container env)."
+                        )
+                if env_pwd:
                     password_prompt = _env_prompt("TG_2FA_PASSWORD")
+                    # TG_2FA_PASSWORD is only required when the account
+                    # actually has 2FA enabled, which we can't know
+                    # until after the OTP step. An unset env var here
+                    # is therefore legal — it only becomes an error if
+                    # 2FA turns out to be on (handled in
+                    # `_interactive_login`).
                 await self._interactive_login(
                     code_prompt=code_prompt,
                     password_prompt=password_prompt,
+                    code_max_attempts=_ENV_PROMPT_MAX_ATTEMPTS if env_code else max_attempts,
+                    password_max_attempts=_ENV_PROMPT_MAX_ATTEMPTS if env_pwd else max_attempts,
                 )
 
             me = await self.client.get_me()
@@ -143,18 +179,24 @@ class TelegramService:
         *,
         code_prompt: PromptFn,
         password_prompt: PromptFn,
+        code_max_attempts: Optional[int] = None,
+        password_max_attempts: Optional[int] = None,
     ) -> None:
         """Drive the sign-in flow.
 
         Sends a code request to the phone configured in :attr:`Settings.tg_phone`,
-        then asks ``code_prompt`` for the code the user received. Re-prompts
-        on ``PhoneCodeInvalidError`` (no resend) up to
-        :data:`_ENV_PROMPT_MAX_ATTEMPTS` times — but only the env-var path
-        actually hits that cap; interactive prompts keep going until the
-        user gets it right or aborts.
+        then asks ``code_prompt`` for the code the user received.
+        ``code_max_attempts`` (``None`` = unlimited) bounds how many
+        invalid codes we'll tolerate before failing — the env-var
+        fallback uses a small cap so a stale or wrong env var cannot
+        hang the lifespan, while the interactive CLI passes ``None``
+        so the user can keep typing until they get it right or Ctrl-C.
 
-        If the account has 2FA enabled, ``password_prompt`` is consulted for
-        the cloud password.
+        If the account has 2FA enabled, ``password_prompt`` is consulted
+        for the cloud password, with the same retry semantics governed by
+        ``password_max_attempts``. Unlike the OTP path, the 2FA path is
+        a real retry loop (not a single-shot prompt) so a mistyped
+        password doesn't crash the whole CLI run.
         """
         assert self.client is not None  # set by start()
         phone = self.settings.tg_phone
@@ -174,20 +216,22 @@ class TelegramService:
             attempt += 1
             code = code_prompt()
             if code is None or code == "":
-                # Distinguish "no env var set" (scripted path) from
-                # "user hit Enter on an empty prompt" (interactive).
-                # Both are fatal for the env-var path; interactive
-                # prompts are looped by the caller until the user types
-                # something or Ctrl-Cs.
-                if os.getenv("TG_CODE") is None and code_prompt is _env_prompt("TG_CODE"):
-                    raise RuntimeError(
-                        "First-time login required. Run `dnnotification cli tglogin` "
-                        "from the host (or, for scripted login, set TG_CODE and "
-                        "TG_2FA_PASSWORD in the container env)."
-                    )
-                # Interactive: an empty submission is a soft retry, not
-                # an abort — but don't burn an attempt on it.
-                attempt -= 1
+                # Empty submission. Two cases:
+                #   * Interactive (code_max_attempts is None): treat as a
+                #     soft retry — don't burn an attempt, just re-prompt.
+                #   * Env-var fallback: `start()` pre-checks the env var
+                #     before we get here, so an empty here is impossible
+                #     under normal operation. If we somehow see it (e.g.
+                #     the env var was unset between start() and now), the
+                #     cap will kick in on the next iteration as the user
+                #     keeps hitting `PhoneCodeInvalidError`.
+                if code_max_attempts is None:
+                    # Interactive path: soft retry, don't burn an attempt.
+                    attempt -= 1
+                # Env-var path: just let the loop continue. The next
+                # iteration will get the same empty value back, which
+                # will burn an attempt and the cap will fire after the
+                # configured number of tries (typically 3).
                 continue
 
             try:
@@ -204,9 +248,9 @@ class TelegramService:
                     "expires; we are NOT requesting a new SMS.",
                     attempt,
                 )
-                if attempt >= _ENV_PROMPT_MAX_ATTEMPTS and code_prompt is _env_prompt("TG_CODE"):
+                if code_max_attempts is not None and attempt >= code_max_attempts:
                     raise RuntimeError(
-                        f"Login code rejected {_ENV_PROMPT_MAX_ATTEMPTS} times. "
+                        f"Login code rejected {code_max_attempts} times. "
                         f"Aborting; re-run `dnnotification cli tglogin`."
                     )
                 # Loop and re-prompt.
@@ -222,17 +266,59 @@ class TelegramService:
                     f"Telegram rejected TG_API_ID / TG_API_HASH ({exc})."
                 ) from exc
 
-        # 2FA path.
-        password = password_prompt()
-        if not password:
-            if os.getenv("TG_2FA_PASSWORD") is None and password_prompt is _env_prompt("TG_2FA_PASSWORD"):
+        # 2FA path. Like the OTP path above, we loop on rejection so
+        # the operator can re-enter the password without re-running
+        # the whole flow. The two distinct Telethon errors that can
+        # mean "wrong password" are:
+        #   * PasswordHashInvalidError — the SRP handshake completed
+        #     but Telegram rejected the resulting password hash.
+        #   * SrpIdInvalidError — Telethon sent a stale/duplicate SRP
+        #     ID to Telegram (a transient error that warrants a retry
+        #     with a fresh client.sign_in() call, not a new password).
+        #
+        # CRITICAL: the password is passed through verbatim — no
+        # stripping — because Telegram 2FA cloud passwords are
+        # user-defined and may legitimately contain leading or
+        # trailing whitespace that contributes to the hash.
+        pwd_attempt = 0
+        while True:
+            pwd_attempt += 1
+            password = password_prompt()
+            if not password:
+                # Empty password. Two cases:
+                #   * Interactive (password_max_attempts is None): the
+                #     user hit Enter on an empty getpass prompt to back
+                #     out — abort with the actionable hint.
+                #   * Env-var (password_max_attempts is set): the env
+                #     var was unset/empty; we deferred this check from
+                #     start() because the password is only needed when
+                #     2FA is actually enabled. Fail loudly here so the
+                #     operator knows what to set.
                 raise RuntimeError(
                     "Account has 2FA enabled. Run `dnnotification cli tglogin` "
                     "to enter the cloud password interactively, or set "
                     "TG_2FA_PASSWORD in the container env."
                 )
-            raise RuntimeError("2FA password is required.")
-        await self.client.sign_in(password=password)
+            try:
+                await self.client.sign_in(password=password)
+                return
+            except (PasswordHashInvalidError, SrpIdInvalidError) as exc:
+                logger.warning(
+                    "2FA password was rejected (attempt %d, %s). Try again — "
+                    "the cloud password is case-sensitive and whitespace "
+                    "matters; do not trim it.",
+                    pwd_attempt,
+                    type(exc).__name__,
+                )
+                if (
+                    password_max_attempts is not None
+                    and pwd_attempt >= password_max_attempts
+                ):
+                    raise RuntimeError(
+                        f"2FA password rejected {password_max_attempts} times. "
+                        f"Aborting; re-run `dnnotification cli tglogin`."
+                    ) from exc
+                # Loop and re-prompt.
 
     async def stop(self) -> None:
         async with self._lock:
