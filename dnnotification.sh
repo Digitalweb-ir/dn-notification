@@ -46,12 +46,12 @@ readonly RAW_BASE="https://raw.githubusercontent.com/Digitalweb-ir/dn-notificati
 # env var and the request will pick it up automatically.
 readonly RELEASES_API="https://api.github.com/repos/Digitalweb-ir/dn-notification/releases/latest"
 readonly DOCKER_IMAGE="digitalneetwork/dn-notification:latest"
-# OCI image label set by the release workflow. The version baked into
-# the running image is the only installed-version signal we need; the
-# CLI used to `docker exec cat /app/VERSION` but the on-disk VERSION
-# file is gone — the version is now owned by the git tag and stamped
-# on the image at build time.
-readonly IMAGE_VERSION_LABEL="org.opencontainers.image.version"
+# The version is owned by the git tag (semantic-release). The release
+# workflow passes the tag to the Dockerfile as a build-arg, which bakes
+# it into the image as ``APP_VERSION``; ``app/__init__.py`` reads that
+# as ``__version__``. The shell CLI queries it by exec-ing into the
+# running container (see ``read_installed_version``) — not from a
+# OCI label, not from a baked-in /app/VERSION file.
 
 # -----------------------------------------------------------------------------
 # Filesystem layout
@@ -504,27 +504,47 @@ container_is_running() {
 }
 
 read_installed_version() {
-    # Read the version from the local image's OCI label, not from
-    # inside the running container. This is more robust than the old
-    # `docker exec cat /app/VERSION` because:
-    #   * It works even when the container is not currently running.
-    #   * The label is stamped at build time from the same git tag
-    #     the GitHub Releases API returns, so the two can never drift.
-    #   * It does not depend on a baked-in /app/VERSION file (which
-    #     was the original staleness problem: the file was committed
-    #     by CI but the local checkout could be out of date).
+    # Read the version from the running Python application. The
+    # version is owned by the git tag (semantic-release) and exposed
+    # by `app/__init__.py` as ``__version__`` — that constant is
+    # resolved at import time from ``APP_VERSION`` (set by the
+    # Dockerfile at build time) or, in dev installs, from
+    # ``git describe``.
+    #
+    # Reading the version from inside the running container — rather
+    # than from the image's OCI label — is the right source of truth:
+    #   * The label reflects the **image**, which may differ from
+    #     the **container** if the user ran an older image, ran a
+    #     locally-built image, or mounted a custom /app. The Python
+    #     app inside the container is the thing actually serving
+    #     requests, so its ``__version__`` is what the operator
+    #     cares about.
+    #   * No baked-in /app/VERSION file, no docker-inspect JSON
+    #     parsing, no shell quoting around OCI label keys.
+    #
+    # Requires the container to be running. The callers
+    # (``cmd_update``, ``cmd_version``, ``cmd_status``) are all
+    # day-2 commands run after ``install`` + ``up``; a stopped
+    # container is a real error condition there, not a degraded
+    # mode we want to paper over with stale data.
     #
     # Returns the version string on stdout and exit 0, or exits 1
-    # when the image or label cannot be read.
+    # when the container isn't running or the Python introspection
+    # fails.
     if ! command -v docker >/dev/null 2>&1; then
         return 1
     fi
-    if ! docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
+    if [[ ! -f "$COMPOSE_FILE" ]]; then
         return 1
     fi
     local v
-    v=$(docker image inspect --format "{{index .Config.Labels \"${IMAGE_VERSION_LABEL}\"}}" "$DOCKER_IMAGE" 2>/dev/null \
-        | tr -d '[:space:]')
+    if ! v=$(docker compose -f "$COMPOSE_FILE" exec -T "$SERVICE_NAME" \
+            python -c 'from app import __version__; print(__version__)' 2>/dev/null); then
+        return 1
+    fi
+    # ``print`` adds a trailing newline; trim all whitespace so the
+    # value is comparable to the GitHub release's tag_name.
+    v=$(printf '%s' "$v" | tr -d '[:space:]')
     if [[ -z "$v" ]]; then
         return 1
     fi
@@ -673,15 +693,17 @@ cmd_update() {
 
     log_section "Update"
 
-    # Step 1: read installed version from the local image's OCI label.
-    # The version is stamped on the image at build time, so we do not
-    # need the container to be running to know what's installed.
+    # Step 1: read installed version from the running Python app
+    # (``app.__version__``). Requires the container to be up; if it
+    # isn't, we fail with a clear hint rather than papering over it
+    # with stale data.
     local installed
     if ! installed=$(read_installed_version); then
-        die "Could not read the installed version from $DOCKER_IMAGE. " \
-            "Is the image pulled? Try '$SCRIPT_NAME up' first, or '$SCRIPT_NAME status' for details."
+        die "Could not read the installed version from the running " \
+            "container. Is it up? Try '$SCRIPT_NAME up' first, or " \
+            "'$SCRIPT_NAME status' for details."
     fi
-    log_info "Installed version (from image label): $installed"
+    log_info "Installed version (from running app): $installed"
 
     # Step 2: read the latest release tag from the GitHub Releases API.
     # The API returns the latest non-draft, non-prerelease release; for
@@ -789,17 +811,23 @@ cmd_edit() {
 cmd_edit_env() { cmd_edit "$ENV_FILE"; }
 
 cmd_version() {
-    # Print the version baked into the local image. The image's
-    # OCI label is the same value `APP_VERSION` env var exposes
-    # inside the running container, so this matches what the app
-    # itself reports. We can read the label whether the container
-    # is up or not, so we no longer gate on `container_is_running`.
+    # Print the version reported by the running Python app. The
+    # version lives in ``app.__version__`` (resolved at import time
+    # from ``APP_VERSION`` or ``git describe``), so we exec into the
+    # container to ask it directly — that's the canonical answer to
+    # "what version am I actually running?".
+    #
+    # Requires the container to be running. We intentionally do not
+    # fall back to the image's OCI label: the user asked for the
+    # running app's version, and a stale image that's not running is
+    # not what was asked for.
     local v
     if v=$(read_installed_version); then
         printf '%s %s\n' "$SCRIPT_NAME" "$v"
         return
     fi
-    printf '%s %s (no image installed)\n' "$SCRIPT_NAME" "$SCRIPT_VERSION"
+    printf '%s %s (container not running — start with `%s up`)\n' \
+        "$SCRIPT_NAME" "$SCRIPT_VERSION" "$SCRIPT_NAME"
 }
 
 cmd_status() {
@@ -848,14 +876,11 @@ cmd_status() {
         printf '  %s%-12s%s %s\n' "$C_BOLD" "port"        "$C_RESET" "$port"
     else
         printf '  %s%-12s%s %s\n' "$C_BOLD" "container"   "$C_RESET" "${C_RED}stopped${C_RESET}"
-        # The image is the source of truth for the installed version
-        # (the version is on the image, not on the container state).
-        # Show it here too, so `status` is useful even when down.
-        local stopped_version
-        stopped_version=$(read_installed_version 2>/dev/null || true)
-        if [[ -n "$stopped_version" ]]; then
-            printf '  %s%-12s%s %s (image)\n' "$C_BOLD" "version" "$C_RESET" "$stopped_version"
-        fi
+        # The container is the source of truth for the version (the
+        # Python app's ``__version__``); when it's down there is no
+        # reliable installed-version signal to display here. The
+        # operator can run `dnnotification version` after bringing
+        # the container back up.
     fi
 
     # HTTP health (best-effort)
