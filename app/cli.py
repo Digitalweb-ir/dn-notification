@@ -1,36 +1,40 @@
 """cli — operator CLI for the dn-notification service.
 
-This module is the in-container entry point for the day-2 operations
-that the FastAPI app does not handle on its own — most importantly,
-the **first-time Telegram login**, which is interactive (it has to
-ask the user for the SMS code Telegram sent them, and that code is
-single-use so it cannot be stored).
+This module is a **thin HTTP client** that drives admin endpoints on
+the running FastAPI process. There is intentionally no
+``TelegramService`` instantiated here: the FastAPI process owns the
+single ``TelegramService`` singleton, and both the operator-facing
+endpoints (``/search``, ``/send-voice``) and the operator-driven
+admin login endpoints (``/admin/login/...``) call into it. The CLI
+is the operator's way to type prompts (SMS code, 2FA password) and
+forward them over HTTP. After ``tglogin`` completes, the same
+singleton the endpoints use is now authorized, so the user does
+not need to restart anything.
 
-Usage (inside the container)::
+Usage (inside the container, typically via the host's
+``dnnotification cli tglogin`` wrapper which does the docker exec
+with a TTY allocated)::
 
     python -m app.cli tglogin
     python -m app.cli status
 
-From the host, ``dnnotification login`` is a thin wrapper that runs
-this CLI via ``docker exec`` and (for ``tglogin``) drives the
-interactive login in the same process as the running service via a
-``POST /admin/handoff`` so the running service picks up the new
-session without a container restart.
+The Typer subcommand list is meant to grow: each new operator
+action is a new subcommand here + a new admin endpoint in
+``app/main.py``; the shared glue in this module is just the
+``_request`` helper that wraps ``httpx``.
 """
 from __future__ import annotations
 
 import asyncio
 import getpass
 import sys
-from datetime import datetime, timezone
+from typing import Any, Mapping, Optional
 
 import httpx
 import typer
-from telethon.tl.types import User
 
 from .config import get_settings
 from .logger import setup_logging
-from .telegram_client import TelegramService
 
 app = typer.Typer(
     name="dnapp-cli",
@@ -45,66 +49,49 @@ app = typer.Typer(
 # docker-compose.yaml's service port.
 _SERVICE_BASE_URL = "http://127.0.0.1:8000"
 
-
-def _build_service() -> TelegramService:
-    """Return a fresh TelegramService wired to the current env/.env.
-
-    We intentionally bypass :func:`get_telegram_service` (the cached
-    singleton the FastAPI app uses) — the CLI is a short-lived
-    process, and reusing the singleton across CLI invocations would
-    pin a stale connection in memory.
-    """
-    return TelegramService(get_settings())
+# Long timeout: the operator may take a long time to fetch the SMS
+# code, and 2FA passwords may be typed while looking at a password
+# manager. The login can be slow on the wire too (Telegram's
+# send_code_request can take several seconds on a cold connection).
+_HTTP_TIMEOUT = 600.0
 
 
-async def _handoff_to_running_service(api_key: str) -> tuple[bool, str]:
-    """Tell the running FastAPI service to reload from the on-disk session.
+async def _request(
+    method: str,
+    path: str,
+    *,
+    api_key: str,
+    json_body: Optional[Mapping[str, Any]] = None,
+) -> httpx.Response:
+    """Issue an HTTP call to the running FastAPI process.
 
-    The CLI's sign-in writes a fresh auth_key to the bind-mounted
-    .session file. The running service has its own in-memory client
-    built at startup that is now stale. POSTing to ``/admin/handoff``
-    tells it to stop the stale client and start a new one that
-    loads the authorized auth_key from disk.
-
-    Returns ``(success, message)`` — on success the running service
-    is live and ``/search``/``/send-voice`` will return real results;
-    on failure the on-disk session is still valid and ``dnnotification
-    restart`` will pick it up.
+    Centralised so every command authenticates the same way and
+    surfaces a uniform error if the running service is unreachable
+    (the CLI cannot proceed if the service is down — every command
+    assumes a live FastAPI process).
     """
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{_SERVICE_BASE_URL}/admin/handoff",
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            return await client.request(
+                method,
+                f"{_SERVICE_BASE_URL}{path}",
                 headers={"X-API-KEY": api_key},
+                json=json_body,
             )
     except httpx.HTTPError as exc:
-        return False, (
+        # The service is down or unreachable. The host wrapper
+        # (`dnnotification cli …`) auto-starts the container, but a
+        # crash mid-flight lands here. Surface a clear hint and let
+        # the operator act.
+        raise SystemExit(
             f"Could not reach the running service at {_SERVICE_BASE_URL} "
-            f"({exc.__class__.__name__}: {exc}). The on-disk session is "
-            f"still valid — run `dnnotification restart` to load it."
-        )
-
-    if response.status_code == 200:
-        body = response.json()
-        if body.get("already_connected"):
-            return True, "Service was already connected."
-        return True, "Service is now connected."
-
-    # Surface the server's error verbatim so the operator can act on it.
-    try:
-        body = response.json()
-        error = body.get("error") or body.get("detail") or response.text
-    except Exception:
-        error = response.text
-    return False, (
-        f"Handoff returned HTTP {response.status_code}: {error}. "
-        f"The on-disk session is still valid — run `dnnotification restart` "
-        f"to load it."
-    )
+            f"({exc.__class__.__name__}: {exc}). Is the container up? "
+            f"Try `dnnotification up` or `docker logs dn-notification`."
+        ) from exc
 
 
-def _prompt_code() -> str | None:
-    """Prompt the user for the SMS code. Empty input aborts the prompt loop.
+def _prompt_code() -> Optional[str]:
+    """Prompt the user for the SMS code. Empty input signals abort.
 
     The SMS code is digits-only, so trimming surrounding whitespace is
     safe and protects against stray newlines from copy-paste.
@@ -117,7 +104,7 @@ def _prompt_code() -> str | None:
     return value.strip() or None
 
 
-def _prompt_password() -> str | None:
+def _prompt_password() -> Optional[str]:
     """Prompt the user for the 2FA cloud password.
 
     CRITICAL: do NOT strip the value. Telegram 2FA cloud passwords
@@ -138,75 +125,151 @@ def _prompt_password() -> str | None:
 
 @app.command()
 def tglogin() -> None:
-    """Sign in to Telegram interactively and hand off to the running service.
+    """Sign in to Telegram by driving the running service's admin login.
 
-    On success the .session file is written to the host bind-mount
-    (``$DATA_DIR/session/<name>.session``) and the running FastAPI
-    service is told (via ``POST /admin/handoff``) to reload its
-    in-memory client against the new auth_key. Endpoints like
-    ``/search`` and ``/send-voice`` become live immediately — no
-    container restart needed.
-
-    The CLI owns its own short-lived ``TelegramClient`` for the
-    duration of the sign-in. The "Disconnecting Telegram client"
-    line at the end is the CLI's client being torn down after the
-    handoff; it is expected and does not mean the session is lost.
+    The operator types the SMS code and (if required) the 2FA
+    password at the prompts; this command forwards them to the
+    running FastAPI process, which performs the sign-in against
+    its own ``TelegramService`` singleton. After this command
+    exits successfully, ``/search`` and ``/send-voice`` are live —
+    no restart, no handoff, no extra container.
     """
     setup_logging()
-    service = _build_service()
     api_key = get_settings().api_key
 
     async def _run() -> int:
         typer.echo(
-            f"Connecting to Telegram as {service.settings.tg_phone}…",
+            f"Connecting to Telegram as {get_settings().tg_phone}…",
             err=True,
         )
-        try:
-            await service.start(
-                code_prompt=_prompt_code,
-                password_prompt=_prompt_password,
-            )
-            me = await service.require_client().get_me()
-            if isinstance(me, User):
-                display = getattr(me, "username", None) or me.first_name or "?"
-                typer.echo(
-                    f"Login successful — signed in as {display} "
-                    f"(id={me.id}, phone={me.phone}).",
-                    err=True,
-                )
-            else:
-                typer.echo("Login successful.", err=True)
 
-            # Hand off the new auth_key to the running service
-            # BEFORE we disconnect our own client. This is the step
-            # that makes the new session "stick" — the running
-            # service's stale client (built at startup when no
-            # session existed) is stopped, a fresh one is started
-            # that loads the auth_key from disk, and ``is_connected``
-            # flips to True. Endpoints stop returning 503.
-            ok, message = await _handoff_to_running_service(api_key)
-            if ok:
-                typer.echo(message, err=True)
-                typer.echo(
-                    "Session is live — /search and /send-voice are ready.",
-                    err=True,
+        # Step 1: kick off the login in the running service.
+        try:
+            response = await _request("POST", "/admin/login/start", api_key=api_key)
+        except SystemExit as exc:
+            typer.echo(str(exc), err=True)
+            return 1
+
+        if response.status_code == 409:
+            typer.echo(
+                "Another login is already in progress. Wait for it to "
+                "finish or fail, then re-run this command.",
+                err=True,
+            )
+            return 1
+
+        if response.status_code != 200:
+            typer.echo(
+                f"Login start failed: HTTP {response.status_code} — {response.text}",
+                err=True,
+            )
+            return 1
+
+        body = response.json()
+        if body.get("state") == "already_authorized":
+            typer.echo(
+                "Already authorized — no login needed. /search and "
+                "/send-voice are live.",
+                err=True,
+            )
+            return 0
+
+        session_id: str = body["session_id"]
+        typer.echo(
+            "Telegram sent an SMS code to your account. Enter it below.",
+            err=True,
+        )
+
+        # Step 2: drive the prompt loop. The running service's
+        # TelegramService is awaiting the operator's code first, then
+        # (if 2FA is enabled) the password. After each submit, the
+        # response tells us the next state — we follow it until the
+        # service reports ``complete`` or ``failed``.
+        try:
+            while True:
+                # Read the current state to pick the right prompt.
+                response = await _request(
+                    "GET",
+                    f"/admin/login/status?session_id={session_id}",
+                    api_key=api_key,
                 )
-            else:
-                typer.echo(f"Warning: {message}", err=True)
+                if response.status_code != 200:
+                    typer.echo(
+                        f"Status poll failed: HTTP {response.status_code} — {response.text}",
+                        err=True,
+                    )
+                    return 1
+                state = response.json().get("state")
+                if state in ("complete", "failed"):
+                    break
+                if state == "awaiting_code":
+                    value = _prompt_code()
+                elif state == "awaiting_password":
+                    value = _prompt_password()
+                else:
+                    typer.echo(f"Unexpected login state: {state!r}", err=True)
+                    return 1
+                if value is None:
+                    value = ""  # explicit abort
+                # Submit the value; the response reflects the
+                # post-submit state, which is what we'll read on
+                # the next iteration.
+                response = await _request(
+                    "POST",
+                    "/admin/login/submit",
+                    api_key=api_key,
+                    json_body={"session_id": session_id, "value": value},
+                )
+                if response.status_code != 200:
+                    typer.echo(
+                        f"Submit failed: HTTP {response.status_code} — {response.text}",
+                        err=True,
+                    )
+                    return 1
         except KeyboardInterrupt:
             typer.echo("Aborted by user.", err=True)
+            # Send an empty value so the running service's login
+            # state machine exits with a clear "aborted" marker
+            # instead of hanging on the prompt forever.
+            await _request(
+                "POST",
+                "/admin/login/submit",
+                api_key=api_key,
+                json_body={"session_id": session_id, "value": ""},
+            )
             return 130
-        except RuntimeError as exc:
-            typer.echo(f"Login failed: {exc}", err=True)
+
+        # Step 3: read the final state for the user-facing summary.
+        response = await _request(
+            "GET",
+            f"/admin/login/status?session_id={session_id}",
+            api_key=api_key,
+        )
+        if response.status_code != 200:
+            typer.echo(
+                f"Final status read failed: HTTP {response.status_code} — {response.text}",
+                err=True,
+            )
             return 1
-        finally:
-            # Always stop the CLI's client. This produces the
-            # "Disconnecting Telegram client" log line — it is the
-            # CLI's client being torn down, NOT the running
-            # service's. The running service's client is owned by
-            # the FastAPI process and lives until container stop.
-            await service.stop()
-        return 0
+        final = response.json()
+        if final.get("state") == "complete":
+            user = final.get("user") or {}
+            display = user.get("username") or user.get("first_name") or "?"
+            typer.echo(
+                f"Login successful — signed in as {display} "
+                f"(id={user.get('id')}, phone={user.get('phone')}).",
+                err=True,
+            )
+            typer.echo(
+                "Session is live — /search and /send-voice are ready.",
+                err=True,
+            )
+            return 0
+        typer.echo(
+            f"Login failed: {final.get('error') or 'unknown error'}",
+            err=True,
+        )
+        return 1
 
     sys.exit(asyncio.run(_run()))
 
@@ -215,51 +278,46 @@ def tglogin() -> None:
 def status() -> None:
     """Report whether a Telegram session exists and is usable.
 
-    Exits 0 if a session file is present and the credentials inside it
-    are accepted by Telegram; exits 1 otherwise. Intended for use from
-    the host CLI (`dnnotification status`) and from cron/monitoring.
+    Hits ``GET /admin/status`` on the running service and prints
+    a human-readable summary. Exits 0 if the service is
+    authorized; exits 1 otherwise. Intended for use from the host
+    CLI (`dnnotification cli status`) and from cron/monitoring.
     """
-    settings = get_settings()
-    session_path = settings.session_path
-    typer.echo(f"Session file: {session_path}")
-
-    if not session_path.exists():
-        typer.echo("Status: NO SESSION — run `dnnotification login` first.", err=True)
-        raise typer.Exit(code=1)
-
-    mtime = datetime.fromtimestamp(session_path.stat().st_mtime, tz=timezone.utc)
-    typer.echo(f"Last modified: {mtime.isoformat()}")
-
-    service = _build_service()
+    setup_logging()
+    api_key = get_settings().api_key
 
     async def _run() -> int:
-        # Calling start() with no prompts triggers the env-var path.
-        # If the session is already authorized, start() returns
-        # immediately without prompting (the is_user_authorized()
-        # fast path inside start()) and sets ``is_connected=True``.
-        #
-        # If the session is missing or invalid, ``start()`` no longer
-        # raises: it now falls back to "disconnected mode" so the
-        # FastAPI lifespan does not crash-loop. We therefore check
-        # ``is_connected`` ourselves to decide what to report.
         try:
-            await service.start()
-        except RuntimeError as exc:
-            typer.echo(f"Status: SESSION INVALID — {exc}", err=True)
+            response = await _request("GET", "/admin/status", api_key=api_key)
+        except SystemExit as exc:
+            typer.echo(str(exc), err=True)
             return 1
-        finally:
-            await service.stop()
 
-        if not service.is_connected:
+        if response.status_code != 200:
             typer.echo(
-                "Status: SESSION INVALID — no authorized session "
-                "(run `dnnotification login` to sign in).",
+                f"Status check failed: HTTP {response.status_code} — {response.text}",
                 err=True,
             )
             return 1
 
-        typer.echo("Status: AUTHORIZED")
-        return 0
+        body = response.json()
+        typer.echo(f"Session file: {body.get('session_file')}")
+        mtime = body.get("session_mtime")
+        if mtime:
+            typer.echo(f"Last modified: {mtime}")
+        if body.get("authenticated"):
+            user = body.get("user") or {}
+            display = user.get("username") or user.get("first_name") or "?"
+            typer.echo(
+                f"Status: AUTHORIZED — signed in as {display} "
+                f"(id={user.get('id')}, phone={user.get('phone')})."
+            )
+            return 0
+        typer.echo(
+            "Status: NOT AUTHORIZED — run `dnnotification cli tglogin` to sign in.",
+            err=True,
+        )
+        return 1
 
     sys.exit(asyncio.run(_run()))
 

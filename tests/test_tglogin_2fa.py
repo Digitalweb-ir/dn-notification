@@ -237,18 +237,11 @@ async def test_2fa_loop_reprompts_on_srp_id_invalid(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_2fa_env_path_caps_at_max_attempts(tmp_path, monkeypatch):
-    """Env-var fallback must cap the 2FA retry loop so a wrong env var
-    can't hang the lifespan. This is the regression that the broken
-    ``is``-closure cap check failed to catch.
-
-    Tested against ``_interactive_login`` directly with the env-var
-    defaults the lifespan applies (``password_max_attempts`` =
-    :data:`_ENV_PROMPT_MAX_ATTEMPTS`), because the new
-    disconnected-mode behaviour in ``start()`` catches the resulting
-    RuntimeError and degrades to disconnected mode rather than
-    surfacing the cap error to the lifespan.
-    """
+async def test_2fa_loop_caps_at_max_attempts(tmp_path, monkeypatch):
+    """The interactive 2FA retry loop must respect ``password_max_attempts``
+    when the caller passes a finite cap. (The old env-var path was
+    removed; interactive callers can still opt in to a cap by
+    passing ``password_max_attempts=...`` to ``start()``.)"""
     monkeypatch.delenv("TG_CODE", raising=False)
     monkeypatch.delenv("TG_2FA_PASSWORD", raising=False)
     svc = _build_service(tmp_path, monkeypatch)
@@ -277,108 +270,54 @@ async def test_2fa_env_path_caps_at_max_attempts(tmp_path, monkeypatch):
             code_prompt=lambda: "11111",
             password_prompt=lambda: next(passwords),
             code_max_attempts=None,
-            password_max_attempts=3,  # mirror the lifespan default
+            password_max_attempts=3,
         )
 
     assert len(password_calls) == 3
 
 
 @pytest.mark.asyncio
-async def test_start_disconnected_when_no_session_and_no_env(
+async def test_start_does_not_construct_client_when_no_session(
     tmp_path, monkeypatch
 ):
-    """``start()`` must succeed (NOT raise) when the session file is
-    missing and no ``TG_CODE`` env var is set — otherwise the
-    container would crash-loop and the operator would not be able to
-    run ``dnnotification cli tglogin`` against the running container.
+    """The lifespan path (``start()`` with no prompts) must NOT
+    construct a ``TelegramClient`` when there is no authorized
+    session on disk.
 
-    The service should be in ``is_connected=False`` state, which the
-    /search and /send-voice endpoints translate into 503 with the
-    actionable hint.
+    This is the fix for the user-reported "client disconnects
+    immediately after login" bug. The pre-fix flow constructed a
+    client at lifespan time, generated an auth_key via ``connect()``,
+    and then tore it down again when the admin login ran ``start()``
+    a second time. The tear-down / reconstruct cycle left Telethon's
+    internal sender in an inconsistent state. Skipping client
+    construction in the lifespan means exactly one
+    ``TelegramClient`` is constructed per login, eliminating the
+    race.
+
+    Concretely: after ``start()`` returns in the lifespan path on a
+    fresh install, ``svc.client is None`` and ``svc.is_connected``
+    is False. The endpoints that need a session translate this
+    into a 401 with the actionable hint.
     """
     monkeypatch.delenv("TG_CODE", raising=False)
     monkeypatch.delenv("TG_2FA_PASSWORD", raising=False)
     svc = _build_service(tmp_path, monkeypatch)
 
-    fake = _FakeTelegramClient.__new__(_FakeTelegramClient)
-    fake._mock = AsyncMock()
-    fake._mock.connect = AsyncMock(return_value=True)
-    fake._mock.is_user_authorized = AsyncMock(return_value=False)
-    fake._mock.send_code_request = AsyncMock(return_value=True)
-    fake._mock.disconnect = AsyncMock(return_value=True)
-    fake._mock.sign_in = AsyncMock(
-        side_effect=AssertionError("sign_in should not be called when TG_CODE unset")
-    )
-    fake._mock.get_me = AsyncMock(
-        side_effect=AssertionError("get_me should not be called when disconnected")
-    )
+    class _ExplodingTelegramClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError(
+                "TelegramClient must NOT be constructed during the "
+                "lifespan path when there is no authorized session."
+            )
 
     import app.telegram_client as tc_mod
-    instances = [fake]
-
-    class _Queue:
-        def __call__(self, *args, **kwargs):
-            return instances.pop(0)
-
-    monkeypatch.setattr(tc_mod, "TelegramClient", _Queue())
+    monkeypatch.setattr(tc_mod, "TelegramClient", _ExplodingTelegramClient)
 
     # Must not raise — that was the original crash-loop bug.
     await svc.start()
 
     assert svc.is_connected is False
-    # The client is constructed (so /health can introspect it) but
-    # ``_connected`` stays False to signal "not authorized".
-    assert svc.client is fake
-
-
-@pytest.mark.asyncio
-async def test_start_disconnected_when_2fa_needed_but_no_env_var(
-    tmp_path, monkeypatch
-):
-    """``start()`` must degrade to disconnected mode when the OTP
-    env var is set but the 2FA password env var is missing AND the
-    account turns out to have 2FA enabled. Without this, the
-    lifespan would raise on the empty-password branch and the
-    container would restart-loop.
-    """
-    monkeypatch.setenv("TG_CODE", "11111")
-    monkeypatch.delenv("TG_2FA_PASSWORD", raising=False)
-    svc = _build_service(tmp_path, monkeypatch)
-
-    fake = _FakeTelegramClient.__new__(_FakeTelegramClient)
-    fake._mock = AsyncMock()
-    fake._mock.connect = AsyncMock(return_value=True)
-    fake._mock.is_user_authorized = AsyncMock(return_value=False)
-    fake._mock.send_code_request = AsyncMock(return_value=True)
-    fake._mock.disconnect = AsyncMock(return_value=True)
-
-    async def sign_in(*args, code=None, password=None, **kwargs):
-        if password is not None:
-            # The password-prompt closure reads the env var, which is
-            # unset, so this branch should never fire — _interactive_login
-            # raises RuntimeError before calling sign_in(password=...).
-            raise AssertionError("password sign_in should not be called")
-        # Code sign_in: pretend the account has 2FA enabled.
-        raise SessionPasswordNeededError(request=None)
-
-    fake._mock.sign_in = AsyncMock(side_effect=sign_in)
-    fake._mock.get_me = AsyncMock(
-        side_effect=AssertionError("get_me should not be called when disconnected")
-    )
-
-    import app.telegram_client as tc_mod
-    instances = [fake]
-
-    class _Queue:
-        def __call__(self, *args, **kwargs):
-            return instances.pop(0)
-
-    monkeypatch.setattr(tc_mod, "TelegramClient", _Queue())
-
-    # Must not raise.
-    await svc.start()
-
-    assert svc.is_connected is False
+    assert svc.client is None
 
 
 @pytest.mark.asyncio
@@ -388,10 +327,34 @@ async def test_start_succeeds_when_session_already_authorized(
     """When a valid session file exists, ``start()`` must connect,
     detect ``is_user_authorized()`` returns True, and set
     ``is_connected=True`` without going through the login flow.
+
+    The session file must contain a non-empty ``auth_key`` row in
+    the ``sessions`` table — that's the signal ``start()`` uses to
+    decide whether to construct a client in the lifespan path. A
+    fresh-install (no file) skips client construction entirely
+    (see ``test_start_does_not_construct_client_when_no_session``).
     """
     monkeypatch.delenv("TG_CODE", raising=False)
     monkeypatch.delenv("TG_2FA_PASSWORD", raising=False)
     svc = _build_service(tmp_path, monkeypatch)
+
+    # Plant a populated .session file. We don't go through Telethon
+    # for this — the helper just looks for a non-empty auth_key
+    # blob, which is what a successful previous tglogin would have
+    # written.
+    session_path = tmp_path / "session" / "test.session"
+    import sqlite3
+    with sqlite3.connect(str(session_path)) as conn:
+        conn.execute(
+            "CREATE TABLE sessions (auth_key BLOB, user_id INTEGER, "
+            "is_authorized INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO sessions (auth_key, user_id, is_authorized) "
+            "VALUES (?, ?, ?)",
+            (b"\x02" * 256, 999, 1),
+        )
+        conn.commit()
 
     fake = _FakeTelegramClient.__new__(_FakeTelegramClient)
     fake._mock = AsyncMock()
@@ -422,6 +385,81 @@ async def test_start_succeeds_when_session_already_authorized(
     await svc.start()
 
     assert svc.is_connected is True
+    assert svc.client is fake
+
+
+@pytest.mark.asyncio
+async def test_client_stays_connected_after_login_completes(
+    tmp_path, monkeypatch
+):
+    """Regression: after a successful ``start(code_prompt=...)`` call
+    (the admin login path), ``is_connected`` MUST stay True across
+    the boundary where the operator's CLI returns and the next
+    request arrives.
+
+    The user-reported symptom was "login reports success, but the
+    client disconnects immediately afterward" — that race is closed
+    by no longer pre-connecting a client in the lifespan. This test
+    pins the invariant: after the admin login returns, the singleton
+    is still authorized and the same client is still on disk.
+    """
+    import asyncio
+
+    monkeypatch.delenv("TG_CODE", raising=False)
+    monkeypatch.delenv("TG_2FA_PASSWORD", raising=False)
+    svc = _build_service(tmp_path, monkeypatch)
+
+    fake = _FakeTelegramClient.__new__(_FakeTelegramClient)
+    fake._mock = AsyncMock()
+    fake._mock.connect = AsyncMock(return_value=True)
+    # First call (login): not authorized yet. After sign_in succeeds,
+    # ``is_user_authorized`` will not be called again on this client
+    # because we go through the post-login get_me path. (The second
+    # ``is_user_authorized`` would only fire on a separate start()
+    # call, which we don't make.)
+    fake._mock.is_user_authorized = AsyncMock(return_value=False)
+    fake._mock.send_code_request = AsyncMock(return_value=True)
+    fake._mock.disconnect = AsyncMock(return_value=True)
+    fake._mock.sign_in = AsyncMock(return_value=None)
+    me = MagicMock(
+        spec=TgUser,
+        id=999, first_name="Tester", username="tester", phone="+15555550100"
+    )
+    fake._mock.get_me = AsyncMock(return_value=me)
+
+    import app.telegram_client as tc_mod
+    instances = [fake]
+
+    class _Queue:
+        def __call__(self, *args, **kwargs):
+            return instances.pop(0)
+
+    monkeypatch.setattr(tc_mod, "TelegramClient", _Queue())
+
+    # 1. Lifespan path: client must NOT be constructed yet.
+    await svc.start()
+    assert svc.is_connected is False
+    assert svc.client is None
+
+    # 2. Admin login: constructs the client, signs in, sets _connected.
+    await svc.start(
+        code_prompt=lambda: "11111",
+        password_prompt=lambda: "secret",
+    )
+    assert svc.is_connected is True
+    assert svc.client is fake
+    assert fake._mock.disconnect.call_count == 0, (
+        "login completed but the client was disconnected — this is "
+        "the user-reported regression."
+    )
+
+    # 3. The gap between "background task completes" and "first
+    # request arrives": is_connected must still be True and the
+    # client must still be on disk.
+    await asyncio.sleep(0)
+    assert svc.is_connected is True
+    assert svc.client is fake
+    assert fake._mock.disconnect.call_count == 0
 
 
 @pytest.mark.asyncio

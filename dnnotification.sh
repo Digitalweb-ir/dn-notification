@@ -81,7 +81,7 @@ readonly INSTALL_BIN_PATH="${INSTALL_BIN_DIR}/${INSTALL_BIN_NAME}"
 
 readonly SERVICE_NAME="dn-notification"
 readonly SCRIPT_NAME="dnnotification"
-readonly SCRIPT_VERSION="2.3.0"
+readonly SCRIPT_VERSION="2.4.0"
 
 # -----------------------------------------------------------------------------
 # Colors (auto-disabled if stdout isn't a TTY or NO_COLOR is set).
@@ -578,7 +578,7 @@ cmd_install() {
     # FastAPI lifespan is designed to start in disconnected mode when
     # no .session file is on disk: it logs a warning, leaves the
     # Telethon client constructed-but-unauthorized, and the
-    # `/search` and `/send-voice` endpoints return 503 with a hint
+    # `/search` and `/send-voice` endpoints return 401 with a hint
     # pointing at `dnnotification cli tglogin`. The container must
     # be running for the operator to invoke that command, so a
     # session gate here would defeat the whole flow.
@@ -590,11 +590,11 @@ cmd_install() {
     if ! ls "$SESSION_DIR"/*.session >/dev/null 2>&1; then
         printf '\n'
         log_info "No Telegram session under $SESSION_DIR — the service is up"
-        log_info "but endpoints that need a session will return 503. Sign in with:"
-        log_info "    sudo $SCRIPT_NAME login"
-        log_info "which performs the interactive prompt AND hands the new session"
-        log_info "off to the running service so /search + /send-voice become live"
-        log_info "without a container restart."
+        log_info "but endpoints that need a session will return 401. Sign in with:"
+        log_info "    sudo $SCRIPT_NAME cli tglogin"
+        log_info "which drives the running service's admin login flow. The"
+        log_info "authenticated session is shared with the FastAPI endpoints"
+        log_info "automatically — no restart needed."
     fi
 }
 
@@ -633,16 +633,20 @@ cmd_restart() {
 # Why this exists
 # ---------------
 # The Python CLI (`python -m app.cli`) is the authoritative place for
-# operator commands that need to talk to Telethon or to the running
-# container's filesystem (e.g. `tglogin` to write the .session file,
-# `status` to verify a session exists, future things like `logout`).
+# operator commands that need to talk to the running FastAPI process
+# (e.g. `tglogin` to sign in to Telegram via the admin endpoints,
+# `status` to query the running service's authorization state,
+# future things like `logout`). The CLI itself is a thin HTTP client
+# that drives the running service — it shares the service's
+# TelegramService singleton by construction, so a successful
+# `tglogin` immediately authorizes /search and /send-voice.
 #
 # Instead of mirroring every Python command as a separate shell
 # subcommand, this `cli` wrapper just `docker exec`s into the running
 # container and forwards the rest of the argument vector verbatim:
 #
 #     dnnotification cli               # → tgapp --help  (Typer prints menu)
-#     dnnotification cli tglogin       # → tgapp tglogin
+#     dnnotification cli tglogin       # → tgapp tglogin (interactive)
 #     dnnotification cli status        # → tgapp status
 #     dnnotification cli <future cmd>  # → tgapp <future cmd>
 #
@@ -682,53 +686,15 @@ cmd_cli() {
         python -m app.cli "$@"
 }
 
-# login — sign in to Telegram and hand off to the running service.
+# Authentication is performed in-process by the running FastAPI
+# service, via the Python CLI:
 #
-# The .session file is written by `app.cli tglogin` running INSIDE
-# the container against the bind-mounted $SESSION_DIR. The CLI then
-# POSTs to the running FastAPI process's `/admin/handoff` endpoint,
-# which stops the stale Telethon client (built at startup when no
-# session existed) and starts a fresh one that loads the new
-# auth_key from disk. /search + /send-voice become live immediately
-# — no container restart needed.
+#     sudo dnnotification cli tglogin
 #
-# The CLI's own short-lived client is disconnected when the CLI
-# process exits; the "Disconnecting Telegram client" line in the
-# logs is the CLI's client being torn down, NOT the running
-# service's. The running service's client lives until container stop.
-cmd_login() {
-    check_docker
-    [[ -f "$COMPOSE_FILE" ]] || die "No compose file at $COMPOSE_FILE — run '$SCRIPT_NAME install' first."
-
-    # If the container is not running, `docker exec` has no target.
-    # Bring it up first — the lifespan starts in disconnected mode
-    # when no .session is on disk, so this is safe.
-    if ! container_is_running; then
-        log_info "Container is not running — starting it so the CLI exec target exists…"
-        compose up -d >/dev/null 2>&1 || true
-        local i
-        for i in 1 2 3 4 5 6 7 8 9 10; do
-            container_is_running && break
-            sleep 1
-        done
-        container_is_running || die "Container did not come up in time — check 'docker logs $SERVICE_NAME'."
-    fi
-
-    # Drive the interactive login. -it gives getpass a TTY; we do
-    # NOT pass -T because the operator must type the SMS code.
-    # The CLI itself performs the handoff to the running service
-    # before exiting, so no follow-up `compose restart` is needed.
-    log_info "Starting interactive Telegram login (you will be prompted for the SMS code and 2FA password)…"
-    docker compose -f "$COMPOSE_FILE" exec -it "$SERVICE_NAME" \
-        python -m app.cli tglogin || \
-        die "Login aborted — the .session file may be incomplete. Re-run '$SCRIPT_NAME login' to retry."
-
-    # Confirm the running service is now connected. The CLI logs
-    # "Session is live" on success; we mirror that here so the
-    # operator sees the same status from the host shell.
-    log_info "Verifying the running service picked up the new session…"
-    cmd_status
-}
+# That command exec's into the container and drives the service's
+# admin login endpoints, which perform the sign-in on the running
+# app's own TelegramService singleton. No restart, no handoff, no
+# second client — see `cmd_cli` above for the passthrough.
 
 cmd_logs() {
     check_docker
@@ -963,28 +929,26 @@ menu_loop() {
         printf '  %s3)%s Down\n'                         "$C_BOLD" "$C_RESET"
         printf '  %s4)%s Restart\n'                      "$C_BOLD" "$C_RESET"
         printf '  %s5)%s Update (check + merge + redeploy)\n' "$C_BOLD" "$C_RESET"
-        printf '  %s6)%s Login (Telegram, hands off to running service)\n' "$C_BOLD" "$C_RESET"
-        printf '  %s7)%s CLI (passthrough to Python CLI)\n' "$C_BOLD" "$C_RESET"
-        printf '  %s8)%s Logs (follow)\n'                "$C_BOLD" "$C_RESET"
-        printf '  %s9)%s Edit docker-compose\n'          "$C_BOLD" "$C_RESET"
-        printf '  %s10)%s Edit .env\n'                   "$C_BOLD" "$C_RESET"
-        printf '  %s11)%s Status\n'                      "$C_BOLD" "$C_RESET"
+        printf '  %s6)%s CLI (passthrough to Python CLI; e.g. tglogin)\n' "$C_BOLD" "$C_RESET"
+        printf '  %s7)%s Logs (follow)\n'                "$C_BOLD" "$C_RESET"
+        printf '  %s8)%s Edit docker-compose\n'          "$C_BOLD" "$C_RESET"
+        printf '  %s9)%s Edit .env\n'                    "$C_BOLD" "$C_RESET"
+        printf '  %s10)%s Status\n'                      "$C_BOLD" "$C_RESET"
         printf '  %s0)%s Exit\n'                         "$C_BOLD" "$C_RESET"
         printf '\n'
         local choice
-        read -r -p "Select [0-11]: " choice
+        read -r -p "Select [0-10]: " choice
         case "$choice" in
             1) cmd_install ;;
             2) cmd_up ;;
             3) cmd_down ;;
             4) cmd_restart ;;
             5) cmd_update ;;
-            6) cmd_login ;;
-            7) cmd_cli ;;
-            8) cmd_logs; printf '\n' ;;
-            9) cmd_edit "$COMPOSE_FILE" ;;
-            10) cmd_edit "$ENV_FILE" ;;
-            11) cmd_status ;;
+            6) cmd_cli ;;
+            7) cmd_logs; printf '\n' ;;
+            8) cmd_edit "$COMPOSE_FILE" ;;
+            9) cmd_edit "$ENV_FILE" ;;
+            10) cmd_status ;;
             0) printf 'Bye.\n'; return 0 ;;
             *) log_warn "Invalid choice: $choice" ;;
         esac
@@ -1010,9 +974,9 @@ Commands:
   up             docker compose up -d
   down           docker compose down
   restart        docker compose restart
-  login          Interactive Telegram login; hands off to the running service (no restart)
   cli [args...]  Passthrough to the in-container Python CLI (e.g. \`cli tglogin\`,
                  \`cli status\`). \`cli\` with no args prints the Python CLI menu.
+                 Use \`cli tglogin\` to sign in to Telegram.
   logs           docker compose logs -f
   update         Check installed version (via GitHub Releases API), merge .env, redeploy with new image
   edit           Open docker-compose.yaml in an editor
@@ -1044,7 +1008,6 @@ main() {
         up)             shift; cmd_up "$@" ;;
         down)           shift; cmd_down "$@" ;;
         restart)        shift; cmd_restart "$@" ;;
-        login)          shift; cmd_login "$@" ;;
         cli)            shift; cmd_cli "$@" ;;
         logs)           shift; cmd_logs "$@" ;;
         update)         shift; cmd_update "$@" ;;

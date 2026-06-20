@@ -6,7 +6,7 @@ session, the service should:
 * start without crashing (so the container does not restart-loop and
   the operator can still run ``dnnotification cli tglogin``);
 * answer ``/health`` with ``telegram_connected=false``;
-* refuse ``/search`` and ``/send-voice`` with HTTP 503 and an
+* refuse ``/search`` and ``/send-voice`` with HTTP 401 and an
   actionable detail pointing at the CLI login command.
 
 These tests mount the FastAPI ASGI app directly via httpx with the
@@ -81,31 +81,31 @@ async def test_health_reports_disconnected(client):
 
 
 @pytest.mark.asyncio
-async def test_search_returns_503_when_disconnected(client):
+async def test_search_returns_401_when_disconnected(client):
     r = await client.post(
         "/search",
         json={"query": "refund"},
         headers={"X-API-KEY": "test-api-key"},
     )
-    assert r.status_code == 503
+    assert r.status_code == 401
     assert r.json()["detail"] == _TG_LOGIN_HINT
 
 
 @pytest.mark.asyncio
-async def test_send_voice_returns_503_when_disconnected(client):
+async def test_send_voice_returns_401_when_disconnected(client):
     r = await client.post(
         "/send-voice",
         json={"chat_id": 12345, "template": "limited"},
         headers={"X-API-KEY": "test-api-key"},
     )
-    assert r.status_code == 503
+    assert r.status_code == 401
     assert r.json()["detail"] == _TG_LOGIN_HINT
 
 
 @pytest.mark.asyncio
 async def test_search_requires_api_key_even_when_disconnected(client):
     """Auth check still fires before the session check — we never
-    want a missing API key to mask as a login-required 503."""
+    want a missing API key to mask as a login-required 401."""
     r = await client.post("/search", json={"query": "refund"})
     assert r.status_code == 401
 
