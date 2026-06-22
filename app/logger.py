@@ -4,6 +4,7 @@ import asyncio
 import logging
 import sys
 from logging.config import dictConfig
+from pathlib import Path
 
 from .config import get_settings
 
@@ -11,6 +12,11 @@ from .config import get_settings
 def setup_logging() -> None:
     settings = get_settings()
     level = settings.log_level.upper()
+
+    # Ensure the logs directory exists before creating the file handler.
+    logs_dir = Path(settings.logs_dir)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    log_file = logs_dir / "app.log"
 
     dictConfig(
         {
@@ -33,13 +39,24 @@ def setup_logging() -> None:
                     "class": "logging.StreamHandler",
                     "stream": sys.stdout,
                 },
+                "file": {
+                    "level": level,
+                    "formatter": "default",
+                    "class": "logging.handlers.TimedRotatingFileHandler",
+                    "filename": str(log_file),
+                    "when": "midnight",
+                    "interval": 1,
+                    "backupCount": 7,
+                    "encoding": "utf-8",
+                    "utc": False,
+                },
             },
             "loggers": {
-                "": {"handlers": ["default"], "level": level, "propagate": False},
-                "uvicorn": {"handlers": ["default"], "level": level, "propagate": False},
-                "uvicorn.error": {"handlers": ["default"], "level": level, "propagate": False},
-                "uvicorn.access": {"handlers": ["default"], "level": level, "propagate": False},
-                "telethon": {"handlers": ["default"], "level": "WARNING", "propagate": False},
+                "": {"handlers": ["default", "file"], "level": level, "propagate": False},
+                "uvicorn": {"handlers": ["default", "file"], "level": level, "propagate": False},
+                "uvicorn.error": {"handlers": ["default", "file"], "level": level, "propagate": False},
+                "uvicorn.access": {"handlers": ["default", "file"], "level": level, "propagate": False},
+                "telethon": {"handlers": ["default", "file"], "level": "WARNING", "propagate": False},
             },
         }
     )
