@@ -358,8 +358,9 @@ download_deployment_files() {
 # -----------------------------------------------------------------------------
 
 # Extract every "KEY=..." (KEY=^[A-Za-z_][A-Za-z0-9_]*$) line from a file.
-# Emits "KEY|VALUE" pairs, in file order, with comments and blank lines
-# stripped. Empty values are preserved.
+# Emits "KEY\037VALUE" pairs (Unit Separator = \x1f) so values
+# containing "|" or "=" are never misinterpreted. Empty values are
+# preserved.
 parse_env_file() {
     local file="$1"
     [[ -f "$file" ]] || return 0
@@ -372,7 +373,7 @@ parse_env_file() {
         if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
             key="${BASH_REMATCH[1]}"
             val="${BASH_REMATCH[2]}"
-            printf '%s|%s\n' "$key" "$val"
+            printf '%s\x1f%s\n' "$key" "$val"
         fi
     done < "$file"
 }
@@ -384,18 +385,22 @@ parse_env_example() {
 }
 
 # Write $key=$val to $ENV_FILE, creating/overwriting just that line.
-# Preserves all other content of the file.
+# Uses line-by-line matching so values containing "=" or other special
+# characters are never mangled (the old awk FS=OFS="=" approach broke
+# values with embedded "=" signs).
 upsert_env_var() {
     local file="$1" key="$2" val="$3"
-    local tmp
+    local tmp found=0
     tmp=$(mktemp)
-    # If the key already exists, replace its line; else append.
-    if grep -qE "^${key}=" "$file" 2>/dev/null; then
-        # Use a delimiter unlikely to appear in user input.
-        awk -v k="$key" -v v="$val" 'BEGIN{FS=OFS="="} $1==k {$2=v; print; next} {print}' \
-            "$file" > "$tmp"
-    else
-        cat "$file" > "$tmp"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == "${key}="* ]]; then
+            printf '%s=%s\n' "$key" "$val"
+            found=1
+        else
+            printf '%s\n' "$line"
+        fi
+    done < "$file" > "$tmp"
+    if [[ $found -eq 0 ]]; then
         printf '%s=%s\n' "$key" "$val" >> "$tmp"
     fi
     mv "$tmp" "$file"
@@ -457,10 +462,10 @@ merge_env_file() {
     # associative arrays. Each line is one existing key.
     local keyset
     keyset=$(mktemp)
-    parse_env_file "$ENV_FILE" | awk -F'|' '{print $1}' > "$keyset"
+    parse_env_file "$ENV_FILE" | awk -F'\x1f' '{print $1}' > "$keyset"
 
     local added=0 skipped=0 line key val new_val
-    while IFS='|' read -r key val; do
+    while IFS=$'\x1f' read -r key val; do
         [[ -z "$key" ]] && continue
         if grep -qxF "$key" "$keyset"; then
             skipped=$((skipped + 1))

@@ -23,15 +23,11 @@ class Settings(BaseSettings):
     # Server
     host: str = "0.0.0.0"
     port: int = 8000
-    debug: str = "false"
-
-    @property
-    def is_debug(self) -> bool:
-        return self.debug.lower() in ("true", "1", "yes")
+    debug: bool = False
 
     @property
     def log_level(self) -> str:
-        return "DEBUG" if self.is_debug else "INFO"
+        return "DEBUG" if self.debug else "INFO"
 
     # Security
     api_key: str
