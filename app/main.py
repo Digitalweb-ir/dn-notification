@@ -94,7 +94,11 @@ async def _require_telegram_session(request: Request) -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_logging()
     settings = get_settings()
-    logger.info("Starting Telegram automation service")
+    logger.info(
+        "Starting Telegram automation service (log_level=%s, debug=%s)",
+        settings.log_level,
+        settings.debug,
+    )
 
     telegram: TelegramService = get_telegram_service()
     await telegram.start()

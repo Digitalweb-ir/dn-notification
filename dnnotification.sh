@@ -612,7 +612,10 @@ cmd_up() {
     check_docker
     [[ -f "$COMPOSE_FILE" ]] || die "No compose file at $COMPOSE_FILE — run '$SCRIPT_NAME install' first."
     log_info "Starting services…"
-    compose up -d "$@"
+    # --force-recreate ensures environment variable changes in .env are
+    # picked up. Without it, `docker compose up -d` reuses the existing
+    # container (with its stale env) whenever the image is unchanged.
+    compose up -d --force-recreate "$@"
     cmd_status
 }
 
@@ -628,7 +631,9 @@ cmd_restart() {
     check_docker
     [[ -f "$COMPOSE_FILE" ]] || die "No compose file at $COMPOSE_FILE."
     log_info "Restarting…"
-    compose restart "$@"
+    # Use up --force-recreate instead of plain restart so .env changes
+    # take effect.  `docker compose restart` keeps the old env vars.
+    compose up -d --force-recreate "$@"
     cmd_status
 }
 

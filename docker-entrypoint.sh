@@ -118,5 +118,16 @@ for d in "$SESSION_DIR" "$LOGS_DIR" "$VOICES_DIR"; do
     fi
 done
 
-log "Storage ready. Starting application."
+# Derive uvicorn's --log-level from the DEBUG env var so that uvicorn's
+# own startup messages (before the app lifespan runs) respect the same
+# setting.  Without this, uvicorn always starts at INFO and overrides
+# the root logger — our in-app dictConfig only catches up later.
+if [ "${DEBUG:-false}" = "true" ]; then
+    UVICORN_LOG_LEVEL=debug
+else
+    UVICORN_LOG_LEVEL=info
+fi
+export UVICORN_LOG_LEVEL
+
+log "Storage ready. Starting application (LOG_LEVEL=$UVICORN_LOG_LEVEL)."
 exec "$@"

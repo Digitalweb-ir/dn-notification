@@ -98,5 +98,9 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # The entrypoint sits between tini (PID 1) and the CMD; tini reaps the
 # entrypoint after it `exec`s into the CMD, so signal forwarding works
 # the same as a direct CMD.
+#
+# SHELL form is used so $UVICORN_LOG_LEVEL (exported by docker-entrypoint.sh
+# based on the DEBUG env var) is expanded. tini forwards signals correctly
+# regardless of exec-vs-shell form.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --log-level ${UVICORN_LOG_LEVEL:-info}
