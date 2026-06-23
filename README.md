@@ -5,11 +5,12 @@
 > `dnnotification` CLI, host layout, and security model.
 
 Production-ready FastAPI service that connects to a **personal Telegram account**
-(via MTProto / Telethon — *not* the Bot API) and exposes two REST endpoints for
+(via MTProto / Telethon — *not* the Bot API) and exposes REST endpoints for
 n8n (or any HTTP client) to use:
 
 * `POST /search` — search private (1-to-1) dialogs for a keyword
 * `POST /send-voice` — send a predefined voice note to a user
+* `POST /send-message` — send a Telegram Business Quick Reply to a user
 
 Group chats and channels are ignored end-to-end. `FloodWaitError` is awaited
 automatically. The session is persistent — no re-login on every request.
@@ -88,8 +89,9 @@ app/
 ├── logger.py             # Structured logging setup
 ├── models.py             # Pydantic request/response schemas
 ├── telegram_client.py    # Telethon wrapper (FloodWait-safe)
-├── search_service.py     # Private-dialog cache + scoring search
-└── voice_service.py      # Voice file mapping + send_file
+├── search_service.py     # Global Telegram search (exact match, private dialogs only)
+├── voice_service.py      # Voice file mapping + send_file
+└── message_service.py    # Quick Reply sender (Telegram Business)
 
 dnnotification.sh         # Deployment CLI (installed to /usr/local/bin/dnnotification)
 package.json              # Minimal Node manifest; pins semantic-release for CI
@@ -343,9 +345,10 @@ curl -X POST http://localhost:8000/search \
 }
 ```
 
-* Only **private** dialogs are scanned — groups and channels are skipped.
-* Top **1–3** matches per chat (configurable via `SEARCH_TOP_MATCHES`).
-* Results are sorted by most recent match date.
+* Only **private** dialogs are searched — groups and channels are skipped.
+* Uses Telegram's **server-side global search** (single API call) for fast results.
+* Only **exact** text matches are returned (the message content equals the query).
+* Top matches (default 3, configurable via `SEARCH_TOP_MATCHES`).
 
 ### `POST /send-voice`
 
@@ -378,26 +381,61 @@ Templates map to files in `app/voices/`:
 > The service refuses to send to bots or non-user entities as a safety
 > check. Telegram `FloodWaitError`s are awaited and retried automatically.
 
+### `POST /send-message`
+
+Sends a [Telegram Business Quick Reply](https://telegram.org/blog/telegram-business#quick-replies) to a user.
+
+> **Requires a Telegram Business account.** Quick Replies are defined in the
+> Telegram app (Settings → Quick Replies). Each shortcut has a name (e.g.
+> `message`) and one or more pre-written messages.
+
+```bash
+curl -X POST http://localhost:8000/send-message \
+  -H "Content-Type: application/json" \
+  -H "X-API-KEY: your_secret_key" \
+  -d '{"chat_id": 123456789, "shortcut": "message"}'
+```
+
+```json
+{
+  "chat_id": 123456789,
+  "shortcut": "message",
+  "message_count": 2,
+  "sent_at": "2026-06-22T15:30:00+00:00"
+}
+```
+
+| Field           | Type   | Description                                              |
+| --------------- | ------ | -------------------------------------------------------- |
+| `chat_id`       | int    | Target user's Telegram ID                               |
+| `shortcut`      | string | Quick Reply name **without** the `/` (e.g. `"message"`) |
+
+* `shortcut` is the name as configured in the Telegram app — without
+  the leading `/`. If the shortcut is invoked as `/message` in the app,
+  pass `"message"` in the API.
+* If the shortcut does not exist, the response returns `400` with a
+  list of available shortcuts.
+* The service refuses to send to bots or non-user entities.
+
 ---
 
 ## Configuration
 
 The only path you set is `DATA_DIR`; everything else is derived from it.
 
-| Env var                 | Default                    | Description                                                                     |
-| ----------------------- | -------------------------- | ------------------------------------------------------------------------------- |
-| `TG_API_ID`             | —                          | From my.telegram.org                                                            |
-| `TG_API_HASH`           | —                          | From my.telegram.org                                                            |
-| `TG_PHONE`              | —                          | Phone number in international format                                            |
-| `TG_SESSION_NAME`       | `telegram_session`         | Name of the persistent .session file                                            |
-| `API_KEY`               | —                          | Required `X-API-KEY` header value                                               |
-| `HOST` / `PORT`         | `0.0.0.0` / `8000`         | Bind address                                                                    |
-| `HOST_PORT`             | `8000`                     | Host port mapping in docker-compose                                             |
-| `LOG_LEVEL`             | `INFO`                     | Log level                                                                       |
-| `SEARCH_LIMIT_PER_CHAT` | `200`                      | Max messages fetched per dialog at warmup                                       |
-| `SEARCH_TOP_MATCHES`    | `3`                        | Max matches returned per chat                                                   |
-| `SEARCH_CACHE_TTL`      | `300`                      | Seconds before dialog cache is refreshed                                        |
-| `DATA_DIR`              | `/var/lib/dn-notification` | Persistent data root (in-container) — voices/session/logs are derived from this |
+| Env var              | Default                    | Description                                                                     |
+| -------------------- | -------------------------- | ------------------------------------------------------------------------------- |
+| `TG_API_ID`          | —                          | From my.telegram.org                                                            |
+| `TG_API_HASH`        | —                          | From my.telegram.org                                                            |
+| `TG_PHONE`           | —                          | Phone number in international format                                            |
+| `TG_SESSION_NAME`    | `telegram_session`         | Name of the persistent .session file                                            |
+| `API_KEY`            | —                          | Required `X-API-KEY` header value                                               |
+| `HOST` / `PORT`      | `0.0.0.0` / `8000`         | Bind address                                                                    |
+| `HOST_PORT`          | `8000`                     | Host port mapping in docker-compose                                             |
+| `DEBUG`              | `false`                    | `true` → DEBUG log level, `false` → INFO                                       |
+| `SEARCH_TOP_MATCHES` | `3`                        | Max matches returned per search                                                 |
+| `SEARCH_CACHE_TTL`   | `300`                      | Seconds before dialog list cache is refreshed                                   |
+| `DATA_DIR`           | `/var/lib/dn-notification` | Persistent data root (in-container) — voices/session/logs are derived from this |
 
 The deployment image and the GitHub repo are **not** configurable:
 

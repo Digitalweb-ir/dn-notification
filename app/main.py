@@ -1,10 +1,10 @@
 """FastAPI entry point for the dn-notification service.
 
-The app exposes a small operator surface (``/search`` and ``/send-voice``)
-backed by a single Telethon (MTProto) client. There is one and only one
-``TelegramService`` instance in the process — API endpoints call into it,
-and the service auto-detects session files written by ``tglogin`` (which
-runs in a separate CLI process).
+The app exposes REST endpoints backed by a single Telethon (MTProto)
+client.  There is one and only one ``TelegramService`` instance in the
+process — API endpoints call into it, and the service auto-detects
+session files written by ``tglogin`` (which runs in a separate CLI
+process).
 
 Login is performed by the CLI (``python -m app.cli tglogin``) in a
 separate process. After the CLI saves the session file, the next API
@@ -13,19 +13,20 @@ on-disk session — no admin endpoints needed.
 """
 from __future__ import annotations
 
-import asyncio
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 
 from . import __version__
 from .config import get_settings
 from .logger import get_logger, setup_logging
+from .message_service import MessageService, MessageServiceError
 from .models import (
     HealthResponse,
+    SendMessageRequest,
+    SendMessageResponse,
     SearchRequest,
     SearchResponse,
     SendVoiceRequest,
@@ -105,35 +106,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     search = SearchService(settings, telegram)
     voice = VoiceService(settings, telegram)
-
-    # Warm the dialog cache in the background so the first request is
-    # fast. Skip when the lifespan started in disconnected mode (no
-    # authorized session) — ``refresh_dialogs`` would just fail, and
-    # ``require_client`` would raise on the empty client state. The
-    # warm task will be a no-op until ``tglogin`` is run; the search
-    # endpoint already returns 401 in that case, so warming is moot.
-    app.state.warm_task = None
-    if telegram.is_connected:
-
-        async def _warm() -> None:
-            try:
-                await search.refresh_dialogs(force=True)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("Initial dialog warm-up failed: %s", e)
-
-        app.state.warm_task = asyncio.create_task(_warm())
+    message = MessageService(settings, telegram)
 
     app.state.telegram = telegram
     app.state.search = search
     app.state.voice = voice
+    app.state.message = message
 
     try:
         yield
     finally:
         logger.info("Shutting down")
-        task = getattr(app.state, "warm_task", None)
-        if task and not task.done():
-            task.cancel()
         await telegram.stop()
 
 
@@ -153,6 +136,11 @@ app = FastAPI(
 
 @app.exception_handler(VoiceServiceError)
 async def _voice_error_handler(_: Request, exc: VoiceServiceError) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(MessageServiceError)
+async def _message_error_handler(_: Request, exc: MessageServiceError) -> JSONResponse:
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
@@ -197,3 +185,16 @@ async def search(req: SearchRequest, request: Request) -> SearchResponse:
 async def send_voice(req: SendVoiceRequest, request: Request) -> SendVoiceResponse:
     svc: VoiceService = request.app.state.voice
     return await svc.send(req.chat_id, req.template)
+
+
+@app.post(
+    "/send-message",
+    response_model=SendMessageResponse,
+    dependencies=[
+        Depends(_require_api_key),
+        Depends(_require_telegram_session),
+    ],
+)
+async def send_message(req: SendMessageRequest, request: Request) -> SendMessageResponse:
+    svc: MessageService = request.app.state.message
+    return await svc.send(req.chat_id, req.shortcut)

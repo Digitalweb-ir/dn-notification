@@ -40,6 +40,18 @@ class SendVoiceResponse(BaseModel):
     sent_at: str
 
 
+class SendMessageRequest(BaseModel):
+    chat_id: int = Field(..., description="Telegram user/chat ID")
+    shortcut: str = Field(..., min_length=1, max_length=64, description="Quick Reply shortcut name (without /)")
+
+
+class SendMessageResponse(BaseModel):
+    chat_id: int
+    shortcut: str
+    message_count: int = Field(..., description="Number of messages sent from the Quick Reply")
+    sent_at: str
+
+
 class HealthResponse(BaseModel):
     status: str
     telegram_connected: bool
