@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from telethon.tl.custom import Dialog
@@ -15,39 +15,35 @@ from .telegram_client import TelegramService
 
 logger = get_logger("search_service")
 
-# Cap concurrent get_messages calls so we don't flood Telegram's API
-# and hit FloodWait.  5 concurrent ≈ reasonable without being abusive.
+# Cap concurrent API calls to avoid FloodWait.
 _FETCH_SEMAPHORE = asyncio.Semaphore(5)
 
 
 @dataclass
-class CachedMessage:
-    message_id: int
-    text: str
-    date_ts: float  # unix timestamp (float)
-    chat_id: int
-
-
-@dataclass
 class CachedDialog:
+    """Lightweight dialog metadata — no messages cached."""
     chat_id: int
     username: Optional[str]
     name: str
-    messages: list[CachedMessage] = field(default_factory=list)
-    last_message_ts: float = 0.0
 
 
 class SearchService:
     """
-    Scans private (1-to-1) dialogs for a keyword.
+    Searches private (1-to-1) dialogs for an exact message match.
 
-    Strategy:
-      * After startup, the dialog list is fetched once and cached (TTL).
-      * On every search we iterate the cached dialogs and pull the most
-        recent N messages per chat. We then run a scored substring match.
-      * To avoid the cost of re-fetching unchanged chats on every call,
-        we only re-fetch chats whose last message timestamp is older than
-        what we have stored (or if we have nothing for that chat).
+    Strategy
+    --------
+    * The **dialog list** (chat IDs + names) is cached with a TTL so we
+      don't re-list chats on every request.
+    * Messages are **never** cached locally — that was the old approach
+      and it caused 503s because fetching 200 messages × 50 chats takes
+      60-100+ seconds.
+    * Instead, each search uses Telegram's **server-side search**
+      (``client.get_messages(entity, search=query)``) and filters for
+      exact text match.  This keeps response times under ~10s even with
+      50+ private chats.
+    * Once ``search_top_matches`` (default 3) results are found,
+      remaining searches are cancelled immediately (early exit).
     """
 
     def __init__(self, settings: Settings, telegram: TelegramService) -> None:
@@ -67,68 +63,28 @@ class SearchService:
         return (time.time() - self._cache_ts) < self._cache_ttl and bool(self._cache)
 
     async def refresh_dialogs(self, force: bool = False) -> None:
-        """Re-fetch all private dialogs. Slow; only call on startup or force."""
+        """Re-fetch the list of private dialogs (fast — no messages)."""
         async with self._lock:
+            if self._cache and not force and self._is_cache_fresh():
+                return
+
             client = self.telegram.require_client()
             started = time.time()
-            logger.info("Refreshing private dialog cache%s", " (forced)" if force else "")
+            logger.info("Refreshing dialog list%s", " (forced)" if force else "")
 
             dialogs: list[Dialog] = await self.telegram.safe_call(client.get_dialogs)
             private_dialogs = [d for d in dialogs if d.is_user]
 
-            # Build the dialog map first (no API calls for messages yet).
             new_cache: dict[int, CachedDialog] = {}
-            entries: list[tuple[int, CachedDialog]] = []
             for d in private_dialogs:
                 entity = d.entity
                 if not isinstance(entity, User) or entity.bot or entity.deleted:
                     continue
-
-                chat_id = entity.id
-                username = entity.username
-                name = self._display_name(entity)
-                cached = CachedDialog(chat_id=chat_id, username=username, name=name)
-                new_cache[chat_id] = cached
-                entries.append((chat_id, cached))
-
-            # Fetch messages for every dialog concurrently (capped by
-            # _FETCH_SEMAPHORE).  This is the expensive part — doing it
-            # sequentially made the endpoint take 60-100+ seconds with
-            # 50+ private chats, causing HTTP 503 timeouts.
-            async def _fetch_one(
-                chat_id: int, dialog: CachedDialog
-            ) -> None:
-                try:
-                    async with _FETCH_SEMAPHORE:
-                        msgs = await self.telegram.safe_call(
-                            client.get_messages,
-                            chat_id,
-                            limit=self.settings.search_limit_per_chat,
-                        )
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "Skip chat %s during refresh (fetch failed)", chat_id
-                    )
-                    return
-
-                for m in msgs:
-                    if not m or not getattr(m, "message", None):
-                        continue
-                    dialog.messages.append(
-                        CachedMessage(
-                            message_id=m.id,
-                            text=m.message,
-                            date_ts=m.date.timestamp() if m.date else 0.0,
-                            chat_id=chat_id,
-                        )
-                    )
-                if dialog.messages:
-                    dialog.last_message_ts = max(
-                        m.date_ts for m in dialog.messages
-                    )
-
-            if entries:
-                await asyncio.gather(*[_fetch_one(cid, d) for cid, d in entries])
+                new_cache[entity.id] = CachedDialog(
+                    chat_id=entity.id,
+                    username=entity.username,
+                    name=self._display_name(entity),
+                )
 
             self._cache = new_cache
             self._cache_ts = time.time()
@@ -142,99 +98,91 @@ class SearchService:
         if not self._is_cache_fresh():
             await self.refresh_dialogs(force=True)
 
-    async def _refresh_stale_dialogs(self) -> None:
-        """For each cached dialog, pull newer messages if any exist."""
-        if not self._cache:
-            await self.refresh_dialogs(force=True)
-            return
-
-        client = self.telegram.require_client()
-
-        async def _refresh_one(chat_id: int, dialog: CachedDialog) -> None:
-            try:
-                async with _FETCH_SEMAPHORE:
-                    msgs = await self.telegram.safe_call(
-                        client.get_messages, chat_id, limit=20
-                    )
-            except Exception:  # noqa: BLE001
-                logger.warning("Skip chat %s during refresh", chat_id)
-                return
-
-            latest_in_cache = dialog.last_message_ts
-            new_msgs: list[CachedMessage] = []
-            for m in msgs:
-                if not m or not getattr(m, "message", None):
-                    continue
-                ts = m.date.timestamp() if m.date else 0.0
-                if ts > latest_in_cache:
-                    new_msgs.append(
-                        CachedMessage(
-                            message_id=m.id,
-                            text=m.message,
-                            date_ts=ts,
-                            chat_id=chat_id,
-                        )
-                    )
-
-            if new_msgs:
-                dialog.messages = (
-                    new_msgs + dialog.messages
-                )[: self.settings.search_limit_per_chat]
-                dialog.last_message_ts = max(
-                    m.date_ts for m in dialog.messages
-                ) if dialog.messages else 0.0
-
-        async with self._lock:
-            entries = list(self._cache.items())
-            if entries:
-                await asyncio.gather(
-                    *[_refresh_one(cid, d) for cid, d in entries]
-                )
-
-            self._cache_ts = time.time()
-
     # ------------------------------------------------------------------ search
 
     async def search(self, query: str) -> list[SearchResultItem]:
+        """Search for an exact message match across all private dialogs.
+
+        Uses Telegram's server-side search (``get_messages(search=…)``)
+        per dialog, then filters for **exact** text match.  Returns at
+        most ``search_top_matches`` (default 3) results.
+
+        Early exit: as soon as enough results are found, remaining
+        in-flight searches are cancelled.
+        """
         query = query.strip()
         if not query:
             return []
 
         await self._ensure_dialogs_loaded()
-        await self._refresh_stale_dialogs()
-
-        query_lower = query.lower()
+        client = self.telegram.require_client()
         top_n = self.settings.search_top_matches
-
         results: list[SearchResultItem] = []
-        for dialog in self._cache.values():
-            scored: list[tuple[float, CachedMessage]] = []
-            for msg in dialog.messages:
-                score = self._score(query_lower, msg.text)
-                if score > 0:
-                    scored.append((score, msg))
+        started = time.time()
 
-            if not scored:
-                continue
+        async def _search_dialog(
+            chat_id: int, dialog: CachedDialog
+        ) -> Optional[SearchResultItem]:
+            try:
+                async with _FETCH_SEMAPHORE:
+                    msgs = await self.telegram.safe_call(
+                        client.get_messages,
+                        chat_id,
+                        search=query,
+                        limit=5,
+                    )
+            except Exception:  # noqa: BLE001
+                logger.warning("Search failed for chat %s", chat_id)
+                return None
 
-            # highest score first, then most recent
-            scored.sort(key=lambda x: (x[0], x[1].date_ts), reverse=True)
-            for score, msg in scored[:top_n]:
-                results.append(
-                    SearchResultItem(
+            for m in msgs:
+                if not m or not getattr(m, "message", None):
+                    continue
+                # Exact match — the message text is exactly the query.
+                if m.message.strip() == query:
+                    return SearchResultItem(
                         chat_id=dialog.chat_id,
                         username=dialog.username,
                         name=dialog.name,
-                        message=msg.text,
-                        message_date=self._iso(msg.date_ts),
-                        message_id=msg.message_id,
-                        match_score=round(score, 4),
+                        message=m.message,
+                        message_date=self._iso(
+                            m.date.timestamp() if m.date else 0.0
+                        ),
+                        message_id=m.id,
+                        match_score=1.0,
                     )
-                )
+            return None
 
-        # Sort final result by most recent match
+        # Fire off all dialog searches concurrently (capped by the
+        # semaphore), but stop as soon as we have enough results.
+        pending: set[asyncio.Task] = {
+            asyncio.create_task(_search_dialog(cid, d))
+            for cid, d in self._cache.items()
+        }
+
+        while pending and len(results) < top_n:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                r = task.result()
+                if r is not None:
+                    results.append(r)
+
+        # Cancel any remaining in-flight searches — we have enough.
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
         results.sort(key=lambda r: r.message_date, reverse=True)
-        return results
+        logger.info(
+            "Search '%s': %d result(s) in %.1fs",
+            query,
+            len(results),
+            time.time() - started,
+        )
+        return results[:top_n]
 
     # ------------------------------------------------------------------ utils
 
@@ -251,33 +199,3 @@ class SearchService:
         from datetime import datetime, timezone
 
         return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-
-    @staticmethod
-    def _score(query: str, text: str) -> float:
-        """
-        Cheap scoring function:
-          * Exact substring match => 1.0
-          * Word-boundary match   => 0.7
-          * Subsequence match     => 0.3
-          * No match              => 0
-        Length of message is used to slightly penalize very long ones.
-        """
-        if not text:
-            return 0.0
-        t = text.lower()
-        if query in t:
-            if f" {query} " in f" {t} " or t.startswith(query) or t.endswith(query):
-                base = 0.9
-            else:
-                base = 0.6
-            # Penalize long messages
-            return max(0.1, base - min(0.4, len(text) / 1000.0))
-
-        # Subsequence match
-        i = 0
-        for ch in t:
-            if ch == query[i]:
-                i += 1
-                if i == len(query):
-                    return 0.25
-        return 0.0

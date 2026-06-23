@@ -33,7 +33,6 @@ class Settings(BaseSettings):
     api_key: str
 
     # Search
-    search_limit_per_chat: int = 200
     search_top_matches: int = 3
     search_cache_ttl: int = 300
 
