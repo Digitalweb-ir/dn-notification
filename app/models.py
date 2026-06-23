@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 VoiceTemplate = Literal["expired", "limited", "custom"]
 
@@ -42,13 +42,37 @@ class SendVoiceResponse(BaseModel):
 
 class SendMessageRequest(BaseModel):
     chat_id: int = Field(..., description="Telegram user/chat ID")
-    shortcut: str = Field(..., min_length=1, max_length=64, description="Quick Reply shortcut name (without /)")
+    shortcut: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=64,
+        description="Quick Reply shortcut name (without /)",
+    )
+    message: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=4096,
+        description="Raw text message to send directly",
+    )
+
+    @model_validator(mode="after")
+    def _check_mode(self) -> "SendMessageRequest":
+        if bool(self.shortcut) == bool(self.message):
+            raise ValueError(
+                "Provide either 'shortcut' or 'message', not both and not neither"
+            )
+        return self
 
 
 class SendMessageResponse(BaseModel):
     chat_id: int
-    shortcut: str
-    message_count: int = Field(..., description="Number of messages sent from the Quick Reply")
+    shortcut: Optional[str] = None
+    message_count: Optional[int] = Field(
+        None, description="Number of messages sent (Quick Reply mode)"
+    )
+    message_id: Optional[int] = Field(
+        None, description="ID of the sent message (direct text mode)"
+    )
     sent_at: str
 
 

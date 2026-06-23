@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Optional, Tuple
 
 from telethon.tl import functions, types
 from telethon.tl.types import User
@@ -18,23 +19,33 @@ class MessageServiceError(Exception):
 
 
 class MessageService:
-    """Sends pre-defined Quick Reply messages to a private chat.
+    """Sends messages to a private chat via two modes.
 
-    Telegram Business accounts can define Quick Replies (shortcuts like
-    ``/message``) in the app.  This service looks up a shortcut by name,
-    resolves its message IDs, and sends them to a target user using
-    ``messages.SendQuickReplyMessagesRequest`` — the server-side
-    equivalent of tapping the quick reply in the Telegram app.
+    **Quick Reply mode** (``shortcut``):
+        Telegram Business accounts can define Quick Replies (shortcuts like
+        ``/message``) in the app.  This service looks up a shortcut by name,
+        resolves its message IDs, and sends them to a target user using
+        ``messages.SendQuickReplyMessagesRequest``.
+
+    **Direct text mode** (``message``):
+        Sends a raw text message directly using ``client.send_message()``.
+        Newlines (``\\n``) in the string are preserved as-is.
     """
 
     def __init__(self, settings: Settings, telegram: TelegramService) -> None:
         self.settings = settings
         self.telegram = telegram
 
-    async def send(self, chat_id: int, shortcut: str) -> SendMessageResponse:
+    # ── shared helpers ────────────────────────────────────────────────
+
+    async def _resolve_user(self, chat_id: int) -> Tuple[User, object]:
+        """Resolve *chat_id* to a real user and return (entity, input_peer).
+
+        Raises ``MessageServiceError`` if the target is not a private user
+        (e.g. a bot, channel, or group).
+        """
         client = self.telegram.require_client()
 
-        # ── 1. Resolve target entity (must be a real user) ──
         try:
             entity = await self.telegram.safe_call(client.get_entity, chat_id)
         except Exception as e:  # noqa: BLE001
@@ -50,7 +61,30 @@ class MessageService:
         if entity.bot:
             raise MessageServiceError("Refusing to send: target is a bot.")
 
-        # ── 2. Fetch all Quick Replies and find the matching shortcut ──
+        input_peer = await client.get_input_entity(chat_id)
+        return entity, input_peer
+
+    # ── public API ─────────────────────────────────────────────────────
+
+    async def send(
+        self,
+        chat_id: int,
+        shortcut: Optional[str] = None,
+        message: Optional[str] = None,
+    ) -> SendMessageResponse:
+        if shortcut:
+            return await self._send_quick_reply(chat_id, shortcut)
+        return await self._send_text(chat_id, message)  # type: ignore[arg-type]
+
+    # ── Quick Reply path ───────────────────────────────────────────────
+
+    async def _send_quick_reply(
+        self, chat_id: int, shortcut: str
+    ) -> SendMessageResponse:
+        client = self.telegram.require_client()
+        entity, input_peer = await self._resolve_user(chat_id)
+
+        # ── 1. Fetch all Quick Replies and find the matching shortcut ──
         try:
             result = await self.telegram.safe_call(
                 client,
@@ -66,7 +100,7 @@ class MessageService:
                 "No Quick Replies found on this account."
             )
 
-        matching: types.QuickReply | None = None
+        matching: Optional[types.QuickReply] = None
         for qr in result.quick_replies:
             if qr.shortcut == shortcut:
                 matching = qr
@@ -79,7 +113,7 @@ class MessageService:
                 f"Available: {available or '(none)'}"
             )
 
-        # ── 3. Get the message IDs inside that shortcut ──
+        # ── 2. Get the message IDs inside that shortcut ──
         try:
             msgs_result = await self.telegram.safe_call(
                 client,
@@ -99,9 +133,8 @@ class MessageService:
                 f"Quick Reply '{shortcut}' has no messages."
             )
 
-        # ── 4. Send the quick reply messages to the target chat ──
+        # ── 3. Send the quick reply messages to the target chat ──
         try:
-            input_peer = await client.get_input_entity(chat_id)
             await self.telegram.safe_call(
                 client,
                 functions.messages.SendQuickReplyMessagesRequest(
@@ -128,5 +161,41 @@ class MessageService:
             chat_id=chat_id,
             shortcut=shortcut,
             message_count=len(msg_ids),
+            sent_at=sent_at,
+        )
+
+    # ── Direct text path ───────────────────────────────────────────────
+
+    async def _send_text(
+        self, chat_id: int, message: str
+    ) -> SendMessageResponse:
+        client = self.telegram.require_client()
+        entity, _ = await self._resolve_user(chat_id)
+
+        try:
+            sent = await self.telegram.safe_call(
+                client.send_message,
+                entity,
+                message,
+                parse_mode=None,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("send_message failed for chat %s", chat_id)
+            raise MessageServiceError(
+                f"Failed to send message: {e}"
+            ) from e
+
+        sent_at = datetime.now(timezone.utc).isoformat()
+        msg_id = getattr(sent, "id", 0)
+        logger.info(
+            "Sent text message to chat %s (msg_id=%s, len=%d)",
+            chat_id,
+            msg_id,
+            len(message),
+        )
+
+        return SendMessageResponse(
+            chat_id=chat_id,
+            message_id=msg_id,
             sent_at=sent_at,
         )

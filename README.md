@@ -383,7 +383,11 @@ Templates map to files in `app/voices/`:
 
 ### `POST /send-message`
 
-Sends a [Telegram Business Quick Reply](https://telegram.org/blog/telegram-business#quick-replies) to a user.
+Sends a message to a user. Supports two mutually exclusive modes:
+
+#### Quick Reply mode
+
+Uses a [Telegram Business Quick Reply](https://telegram.org/blog/telegram-business#quick-replies) — a pre-defined shortcut with one or more messages.
 
 > **Requires a Telegram Business account.** Quick Replies are defined in the
 > Telegram app (Settings → Quick Replies). Each shortcut has a name (e.g.
@@ -393,29 +397,57 @@ Sends a [Telegram Business Quick Reply](https://telegram.org/blog/telegram-busin
 curl -X POST http://localhost:8000/send-message \
   -H "Content-Type: application/json" \
   -H "X-API-KEY: your_secret_key" \
-  -d '{"chat_id": 123456789, "shortcut": "message"}'
+  -d '{"chat_id": 123456789, "shortcut": "expire"}'
 ```
 
 ```json
 {
   "chat_id": 123456789,
-  "shortcut": "message",
+  "shortcut": "expire",
   "message_count": 2,
   "sent_at": "2026-06-22T15:30:00+00:00"
 }
 ```
 
-| Field           | Type   | Description                                              |
-| --------------- | ------ | -------------------------------------------------------- |
-| `chat_id`       | int    | Target user's Telegram ID                               |
-| `shortcut`      | string | Quick Reply name **without** the `/` (e.g. `"message"`) |
+#### Direct text mode
 
-* `shortcut` is the name as configured in the Telegram app — without
-  the leading `/`. If the shortcut is invoked as `/message` in the app,
-  pass `"message"` in the API.
-* If the shortcut does not exist, the response returns `400` with a
-  list of available shortcuts.
-* The service refuses to send to bots or non-user entities.
+Sends a raw text message directly — no Quick Reply needed.
+
+```bash
+curl -X POST http://localhost:8000/send-message \
+  -H "Content-Type: application/json" \
+  -H "X-API-KEY: your_secret_key" \
+  -d '{"chat_id": 123456789, "message": "Hello\nThis is a multi-line message"}'
+```
+
+```json
+{
+  "chat_id": 123456789,
+  "message_id": 42,
+  "sent_at": "2026-06-22T15:30:00+00:00"
+}
+```
+
+#### Request fields
+
+| Field      | Type   | Description                                                     |
+| ---------- | ------ | --------------------------------------------------------------- |
+| `chat_id`  | int    | Target user's Telegram ID                                       |
+| `shortcut` | string | Quick Reply name **without** the `/` (e.g. `"message"`)        |
+| `message`  | string | Raw text to send directly (newlines preserved)                  |
+
+> **Exactly one of `shortcut` or `message` must be provided.** Sending both
+> or neither returns a `422` validation error.
+
+#### Notes
+
+* **Quick Reply mode**: `shortcut` is the name as configured in the Telegram
+  app — without the leading `/`. If the shortcut is invoked as `/message` in
+  the app, pass `"message"` in the API. If the shortcut does not exist, the
+  response returns `400` with a list of available shortcuts.
+* **Direct text mode**: `message` is sent as-is (no Markdown parsing).
+  Newlines (`\n`) are preserved.
+* The service refuses to send to bots or non-user entities in both modes.
 
 ---
 

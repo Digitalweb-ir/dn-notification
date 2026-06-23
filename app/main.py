@@ -197,4 +197,4 @@ async def send_voice(req: SendVoiceRequest, request: Request) -> SendVoiceRespon
 )
 async def send_message(req: SendMessageRequest, request: Request) -> SendMessageResponse:
     svc: MessageService = request.app.state.message
-    return await svc.send(req.chat_id, req.shortcut)
+    return await svc.send(req.chat_id, shortcut=req.shortcut, message=req.message)
