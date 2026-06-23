@@ -15,6 +15,10 @@ from .telegram_client import TelegramService
 
 logger = get_logger("search_service")
 
+# Cap concurrent get_messages calls so we don't flood Telegram's API
+# and hit FloodWait.  5 concurrent ≈ reasonable without being abusive.
+_FETCH_SEMAPHORE = asyncio.Semaphore(5)
+
 
 @dataclass
 class CachedMessage:
@@ -66,12 +70,15 @@ class SearchService:
         """Re-fetch all private dialogs. Slow; only call on startup or force."""
         async with self._lock:
             client = self.telegram.require_client()
+            started = time.time()
             logger.info("Refreshing private dialog cache%s", " (forced)" if force else "")
 
             dialogs: list[Dialog] = await self.telegram.safe_call(client.get_dialogs)
             private_dialogs = [d for d in dialogs if d.is_user]
 
+            # Build the dialog map first (no API calls for messages yet).
             new_cache: dict[int, CachedDialog] = {}
+            entries: list[tuple[int, CachedDialog]] = []
             for d in private_dialogs:
                 entity = d.entity
                 if not isinstance(entity, User) or entity.bot or entity.deleted:
@@ -80,17 +87,34 @@ class SearchService:
                 chat_id = entity.id
                 username = entity.username
                 name = self._display_name(entity)
-
                 cached = CachedDialog(chat_id=chat_id, username=username, name=name)
                 new_cache[chat_id] = cached
+                entries.append((chat_id, cached))
 
-                msgs = await self.telegram.safe_call(
-                    client.get_messages, entity, limit=self.settings.search_limit_per_chat
-                )
+            # Fetch messages for every dialog concurrently (capped by
+            # _FETCH_SEMAPHORE).  This is the expensive part — doing it
+            # sequentially made the endpoint take 60-100+ seconds with
+            # 50+ private chats, causing HTTP 503 timeouts.
+            async def _fetch_one(
+                chat_id: int, dialog: CachedDialog
+            ) -> None:
+                try:
+                    async with _FETCH_SEMAPHORE:
+                        msgs = await self.telegram.safe_call(
+                            client.get_messages,
+                            chat_id,
+                            limit=self.settings.search_limit_per_chat,
+                        )
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Skip chat %s during refresh (fetch failed)", chat_id
+                    )
+                    return
+
                 for m in msgs:
                     if not m or not getattr(m, "message", None):
                         continue
-                    cached.messages.append(
+                    dialog.messages.append(
                         CachedMessage(
                             message_id=m.id,
                             text=m.message,
@@ -98,12 +122,21 @@ class SearchService:
                             chat_id=chat_id,
                         )
                     )
-                if cached.messages:
-                    cached.last_message_ts = max(m.date_ts for m in cached.messages)
+                if dialog.messages:
+                    dialog.last_message_ts = max(
+                        m.date_ts for m in dialog.messages
+                    )
+
+            if entries:
+                await asyncio.gather(*[_fetch_one(cid, d) for cid, d in entries])
 
             self._cache = new_cache
             self._cache_ts = time.time()
-            logger.info("Cached %d private dialogs", len(self._cache))
+            logger.info(
+                "Cached %d private dialogs in %.1fs",
+                len(self._cache),
+                time.time() - started,
+            )
 
     async def _ensure_dialogs_loaded(self) -> None:
         if not self._is_cache_fresh():
@@ -116,38 +149,47 @@ class SearchService:
             return
 
         client = self.telegram.require_client()
-        async with self._lock:
-            for chat_id, dialog in list(self._cache.items()):
-                try:
-                    # Fetch a small window of newest messages
+
+        async def _refresh_one(chat_id: int, dialog: CachedDialog) -> None:
+            try:
+                async with _FETCH_SEMAPHORE:
                     msgs = await self.telegram.safe_call(
                         client.get_messages, chat_id, limit=20
                     )
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("Skip chat %s during refresh: %s", chat_id, e)
+            except Exception:  # noqa: BLE001
+                logger.warning("Skip chat %s during refresh", chat_id)
+                return
+
+            latest_in_cache = dialog.last_message_ts
+            new_msgs: list[CachedMessage] = []
+            for m in msgs:
+                if not m or not getattr(m, "message", None):
                     continue
-
-                latest_in_cache = dialog.last_message_ts
-                new_msgs: list[CachedMessage] = []
-                for m in msgs:
-                    if not m or not getattr(m, "message", None):
-                        continue
-                    ts = m.date.timestamp() if m.date else 0.0
-                    if ts > latest_in_cache:
-                        new_msgs.append(
-                            CachedMessage(
-                                message_id=m.id,
-                                text=m.message,
-                                date_ts=ts,
-                                chat_id=chat_id,
-                            )
+                ts = m.date.timestamp() if m.date else 0.0
+                if ts > latest_in_cache:
+                    new_msgs.append(
+                        CachedMessage(
+                            message_id=m.id,
+                            text=m.message,
+                            date_ts=ts,
+                            chat_id=chat_id,
                         )
+                    )
 
-                if new_msgs:
-                    dialog.messages = (new_msgs + dialog.messages)[: self.settings.search_limit_per_chat]
-                    dialog.last_message_ts = max(
-                        m.date_ts for m in dialog.messages
-                    ) if dialog.messages else 0.0
+            if new_msgs:
+                dialog.messages = (
+                    new_msgs + dialog.messages
+                )[: self.settings.search_limit_per_chat]
+                dialog.last_message_ts = max(
+                    m.date_ts for m in dialog.messages
+                ) if dialog.messages else 0.0
+
+        async with self._lock:
+            entries = list(self._cache.items())
+            if entries:
+                await asyncio.gather(
+                    *[_refresh_one(cid, d) for cid, d in entries]
+                )
 
             self._cache_ts = time.time()
 
