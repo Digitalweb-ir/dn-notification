@@ -6,7 +6,7 @@ services:
     image: digitalneetwork/dn-notification:latest
     restart: always
     # The container runs as root. docker-entrypoint.sh creates and
-    # chowns the three subdirs under $DATA_DIR (session, logs, voices)
+    # chowns the two subdirs under $DATA_DIR (session, logs)
     # at every startup, so the bind-mount works correctly whether the
     # host path is fresh, pre-populated, or owned by a different user.
     # No `user:` override is needed.
@@ -14,8 +14,8 @@ services:
       - .env
     environment:
       # DATA_DIR is the single source of truth for persistent storage.
-      # Voices, session, and logs are derived from it in the app — no
-      # need to set VOICES_DIR / SESSION_DIR / LOGS_DIR here.
+      # Session and logs are derived from it in the app — no
+      # need to set SESSION_DIR / LOGS_DIR here.
       - DATA_DIR=/var/lib/dn-notification
       - PYTHONUNBUFFERED=1
     ports:
@@ -26,7 +26,6 @@ services:
       # recreation, image rebuilds, and upgrades:
       #   /var/lib/dn-notification/session/   -> /var/lib/dn-notification/session/
       #   /var/lib/dn-notification/logs/      -> /var/lib/dn-notification/logs/
-      #   /var/lib/dn-notification/voices/    -> /var/lib/dn-notification/voices/
       - /var/lib/dn-notification:/var/lib/dn-notification
     # The image already declares a HEALTHCHECK; this just makes `docker ps`
     # surface the status nicely.

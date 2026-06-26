@@ -7,7 +7,7 @@ session, the service should:
 * start without crashing (so the container does not restart-loop and
   the operator can still run ``dnnotification cli tglogin``);
 * answer ``/health`` with ``telegram_connected=false``;
-* refuse ``/search`` and ``/send-voice`` with HTTP 401 and an
+* refuse ``/search`` and ``/send-message`` with HTTP 401 and an
   actionable detail pointing at the CLI login command;
 * if ``ensure_connected()`` returns True (session file appeared on
   disk via CLI tglogin), proceed normally instead of returning 401.
@@ -59,7 +59,7 @@ def disconnected_state():
     svc.ensure_connected = AsyncMock(return_value=False)
     app.state.telegram = svc
     app.state.search = MagicMock()
-    app.state.voice = MagicMock()
+    app.state.message = MagicMock()
     yield svc
 
 
@@ -96,10 +96,10 @@ async def test_search_returns_401_when_disconnected(client):
 
 
 @pytest.mark.asyncio
-async def test_send_voice_returns_401_when_disconnected(client):
+async def test_send_message_returns_401_when_disconnected(client):
     r = await client.post(
-        "/send-voice",
-        json={"chat_id": 12345, "template": "limited"},
+        "/send-message",
+        json={"chat_id": 12345, "shortcut": "expire"},
         headers={"X-API-KEY": "test-api-key"},
     )
     assert r.status_code == 401
@@ -115,10 +115,10 @@ async def test_search_requires_api_key_even_when_disconnected(client):
 
 
 @pytest.mark.asyncio
-async def test_send_voice_requires_api_key_even_when_disconnected(client):
+async def test_send_message_requires_api_key_even_when_disconnected(client):
     r = await client.post(
-        "/send-voice",
-        json={"chat_id": 12345, "template": "limited"},
+        "/send-message",
+        json={"chat_id": 12345, "message": "hello"},
     )
     assert r.status_code == 401
 

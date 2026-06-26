@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field, model_validator
-
-VoiceTemplate = Literal["expired", "limited", "custom"]
 
 
 class SearchRequest(BaseModel):
@@ -25,19 +23,6 @@ class SearchResponse(BaseModel):
     query: str
     count: int
     results: list[SearchResultItem]
-
-
-class SendVoiceRequest(BaseModel):
-    chat_id: int = Field(..., description="Telegram user/chat ID")
-    template: VoiceTemplate = "custom"
-
-
-class SendVoiceResponse(BaseModel):
-    chat_id: int
-    template: str
-    file: str
-    message_id: int
-    sent_at: str
 
 
 class SendMessageRequest(BaseModel):

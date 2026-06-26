@@ -19,11 +19,11 @@
 #      digitalneetwork/dn-notification:latest
 #
 #  Host layout (paths are hardcoded):
+#
 #      /opt/dn-notification           project files (docker-compose.yaml, .env)
 #      /var/lib/dn-notification       ALL persistent data (bind-mounted in)
 #          ├── session/   Telegram .session file (account credential)
-#          ├── logs/      application logs
-#          └── voices/    voice templates (.ogg)
+#          └── logs/      application logs
 #
 #  Usage:
 #      dnnotification                 -> interactive menu
@@ -58,7 +58,6 @@ readonly DOCKER_IMAGE="digitalneetwork/dn-notification:latest"
 # -----------------------------------------------------------------------------
 readonly PROJECT_DIR="/opt/dn-notification"
 readonly DATA_DIR="/var/lib/dn-notification"
-readonly VOICES_DIR="${DATA_DIR}/voices"
 readonly SESSION_DIR="${DATA_DIR}/session"
 readonly LOGS_DIR="${DATA_DIR}/logs"
 readonly COMPOSE_FILE="${PROJECT_DIR}/docker-compose.yaml"
@@ -255,7 +254,7 @@ semver_lt() {
 ensure_layout() {
     log_section "Ensuring directories"
     as_root mkdir -p "$PROJECT_DIR"
-    as_root mkdir -p "$DATA_DIR" "$SESSION_DIR" "$LOGS_DIR" "$VOICES_DIR"
+    as_root mkdir -p "$DATA_DIR" "$SESSION_DIR" "$LOGS_DIR"
 
     # Mode 755 (owner rwx, group+other r-x) is the simplest setup that
     # works for a rootful container: install runs as root, so the dirs
@@ -263,14 +262,13 @@ ensure_layout() {
     # matches that ownership and can read/write everything. No chown is
     # needed because there is no in-image non-root service user to align
     # with.
-    as_root chmod 755 "$DATA_DIR" "$SESSION_DIR" "$LOGS_DIR" "$VOICES_DIR"
+    as_root chmod 755 "$DATA_DIR" "$SESSION_DIR" "$LOGS_DIR"
 
     log_ok "Project dir: $PROJECT_DIR"
     log_ok "Data dir:    $DATA_DIR"
     log_ok "  ├─ session: $SESSION_DIR"
     log_ok "  ├─ logs:    $LOGS_DIR"
-    log_ok "  └─ voices:  $VOICES_DIR"
-}
+    }
 
 # -----------------------------------------------------------------------------
 # Compose helper — every lifecycle command goes through this.
@@ -570,10 +568,6 @@ cmd_install() {
     generate_env_file
     install_cli
 
-    if [[ -z "$(ls -A "$VOICES_DIR" 2>/dev/null)" ]]; then
-        log_warn "$VOICES_DIR is empty. Drop at least one .ogg file (e.g. limited.ogg) before /send-voice will work."
-    fi
-
     if [[ ! -f "$COMPOSE_FILE" ]]; then
         log_warn "Skipping 'docker compose up' — no compose file present at $COMPOSE_FILE."
         return 0
@@ -583,7 +577,7 @@ cmd_install() {
     # FastAPI lifespan is designed to start in disconnected mode when
     # no .session file is on disk: it logs a warning, leaves the
     # Telethon client constructed-but-unauthorized, and the
-    # `/search` and `/send-voice` endpoints return 401 with a hint
+    # `/search` and `/send-message` endpoints return 401 with a hint
     # pointing at `dnnotification cli tglogin`. The container must
     # be running for the operator to invoke that command, so a
     # session gate here would defeat the whole flow.
@@ -649,7 +643,7 @@ cmd_restart() {
 # future things like `logout`). The CLI itself is a thin HTTP client
 # that drives the running service — it shares the service's
 # TelegramService singleton by construction, so a successful
-# `tglogin` immediately authorizes /search and /send-voice.
+# `tglogin` immediately authorizes /search and /send-message.
 #
 # Instead of mirroring every Python command as a separate shell
 # subcommand, this `cli` wrapper just `docker exec`s into the running
@@ -879,7 +873,6 @@ cmd_status() {
     # Layout
     printf '  %s%-12s%s %s\n' "$C_BOLD" "project"     "$C_RESET" "$PROJECT_DIR"
     printf '  %s%-12s%s %s\n' "$C_BOLD" "data"        "$C_RESET" "$DATA_DIR"
-    printf '  %s%-12s%s %s\n' "$C_BOLD" "voices"      "$C_RESET" "$VOICES_DIR"
     printf '  %s%-12s%s %s\n' "$C_BOLD" "env file"    "$C_RESET" "$([ -f "$ENV_FILE" ] && echo present || echo MISSING)"
 
     # Container

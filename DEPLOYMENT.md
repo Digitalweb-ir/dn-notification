@@ -10,7 +10,7 @@ service using Docker Compose, managed by a single CLI: `dnnotification`.
 The CLI owns two top-level directories on the host. They are separated by
 design so that project code and **sensitive session data** can be backed up,
 restored, and permissioned independently. **All persistent application data —
-including voice templates — lives under `/var/lib/dn-notification`**; the
+including session data — lives under `/var/lib/dn-notification`**; the
 container bind-mounts that single directory at the same path
 (see `docker-compose.yaml`).
 
@@ -20,13 +20,12 @@ container bind-mounts that single directory at the same path
 | `/var/lib/dn-notification`          | Persistent data — bind-mounted into the container  | `700`         |
 | `/var/lib/dn-notification/session`  | Telegram `.session` file (account credential)      | `700`         |
 | `/var/lib/dn-notification/logs`     | Application logs                                   | `755`         |
-| `/var/lib/dn-notification/voices`   | Voice templates (`.ogg` files)                     | `755`         |
 
 > The `.session` file grants **full access** to the Telegram account that
 > signed in. Treat it like a password. The `700` permission on the data
 > directory means only root (or a member of root's group) can read it.
 
-> The other sub-paths (`session/`, `logs/`, `voices/`) are derived from
+> The other sub-paths (`session/`, `logs/`) are derived from
 > `DATA_DIR` by `app/config.py` — they are **not** environment variables.
 
 ---
@@ -101,7 +100,7 @@ dnnotification version
 4. Downloads `docker-compose.yaml` and `.env.example` from
    `Digitalweb-ir/dn-notification@main`.
 5. Creates `/opt/dn-notification` and the data tree under
-   `/var/lib/dn-notification/{session,logs,voices}`.
+   `/var/lib/dn-notification/{session,logs}`.
 6. Sets `755` on the data directory tree so the container's root
    process can read and write the bind-mount.
 7. Prompts for `TG_API_ID`, `TG_API_HASH`, `TG_PHONE`, `API_KEY` and writes
@@ -113,8 +112,6 @@ dnnotification version
 For the local file paths that you must populate by hand before first use:
 
 ```bash
-# Add at least one voice template.
-sudo cp my-limited.ogg /var/lib/dn-notification/voices/limited.ogg
 ```
 
 ---
@@ -122,12 +119,10 @@ sudo cp my-limited.ogg /var/lib/dn-notification/voices/limited.ogg
 ## 5. Configuration
 
 `/opt/dn-notification/.env` is kept deliberately small. The **only** path you
-configure is `DATA_DIR`; voices, session, and logs are derived from it in
+configure is `DATA_DIR` session, and logs are derived from it in
 `app/config.py`:
 
 ```python
-@property
-def voices_dir(self)  -> str: return f"{self.data_dir}/voices"
 @property
 def session_dir(self) -> str: return f"{self.data_dir}/session"
 @property
@@ -253,7 +248,7 @@ dnnotification
 Reports:
 
 - Docker CLI / compose plugin / daemon reachability
-- Project, data, voices paths
+- Project, data paths
 - `.env` presence
 - Image, container state, started-at, healthcheck, published port
 - **Installed version** (read from the local image's OCI label via `docker image inspect`, no need for the container to be running)
@@ -428,9 +423,6 @@ dnnotification down
 sudo tar -xzf dn-backup-YYYY-MM-DD.tgz -C /var/lib/dn-notification
 dnnotification up
 ```
-
-Voice files are immutable templates; you can rebuild them from source control
-or your own asset bucket, so they're not part of the backup.
 
 ---
 

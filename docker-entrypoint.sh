@@ -29,11 +29,10 @@
 set -eu
 
 # DATA_DIR is the single source of truth for persistent storage — set in
-# docker-compose.yaml. Voices, session, and logs are derived from it.
+# docker-compose.yaml. Session and logs are derived from it.
 DATA_DIR="${DATA_DIR:-/var/lib/dn-notification}"
 SESSION_DIR="${DATA_DIR}/session"
 LOGS_DIR="${DATA_DIR}/logs"
-VOICES_DIR="${DATA_DIR}/voices"
 
 # The app runs as root, so we want every directory to be owned by root.
 # 0755 = rwx for owner (root), r-x for everyone else — safe for bind-mounts
@@ -76,10 +75,10 @@ ensure_dir() {
 
     # chown the directory itself. Do NOT recurse (-R is intentionally
     # avoided): on an existing install, the user may have populated
-    # $DATA_DIR with their own session file, voice templates, or logs,
+    # $DATA_DIR with their own session file or logs,
     # and we must not change ownership underneath them. The container
-    # only needs to be able to *write new* files (session), *append* to
-    # logs, and *read* voices, and root can do all of that without
+    # only needs to be able to *write new* files (session) and *append* to
+    # logs, and root can do all of that without
     # owning the pre-existing content.
     #
     # chown is best-effort: a host directory on a filesystem that
@@ -97,7 +96,7 @@ ensure_dir() {
 }
 
 log "Preparing persistent storage under $DATA_DIR"
-for d in "$DATA_DIR" "$SESSION_DIR" "$LOGS_DIR" "$VOICES_DIR"; do
+for d in "$DATA_DIR" "$SESSION_DIR" "$LOGS_DIR"; do
     ensure_dir "$d"
 done
 
@@ -105,7 +104,7 @@ done
 # catches the rare case where chown silently succeeded (e.g. a read-only
 # bind mount layered on top) but writes are still denied. We use a
 # uniquely-named temp file in each dir and clean up.
-for d in "$SESSION_DIR" "$LOGS_DIR" "$VOICES_DIR"; do
+for d in "$SESSION_DIR" "$LOGS_DIR"; do
     probe="$d/.dn-notification-write-probe.$$"
     if ! (umask 077 && : > "$probe" && rm -f "$probe") 2>/dev/null; then
         log "ERROR: $d is not writable by the container (uid=$(id -u))."

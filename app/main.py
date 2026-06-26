@@ -29,12 +29,9 @@ from .models import (
     SendMessageResponse,
     SearchRequest,
     SearchResponse,
-    SendVoiceRequest,
-    SendVoiceResponse,
 )
 from .search_service import SearchService
 from .telegram_client import TelegramService, get_telegram_service
-from .voice_service import VoiceService, VoiceServiceError
 
 logger = get_logger("main")
 
@@ -105,12 +102,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await telegram.start()
 
     search = SearchService(settings, telegram)
-    voice = VoiceService(settings, telegram)
     message = MessageService(settings, telegram)
 
     app.state.telegram = telegram
     app.state.search = search
-    app.state.voice = voice
     app.state.message = message
 
     try:
@@ -124,7 +119,7 @@ app = FastAPI(
     title="Telegram Automation API",
     description=(
         "Personal-account Telegram automation (MTProto/Telethon) for support workflows. "
-        "Searches private dialogs and sends voice notes."
+        "Searches private dialogs and sends messages."
     ),
     version=__version__,
     lifespan=lifespan,
@@ -132,11 +127,6 @@ app = FastAPI(
 
 
 # --------------------------------------------------------------------- routes
-
-
-@app.exception_handler(VoiceServiceError)
-async def _voice_error_handler(_: Request, exc: VoiceServiceError) -> JSONResponse:
-    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
 @app.exception_handler(MessageServiceError)
@@ -172,19 +162,6 @@ async def search(req: SearchRequest, request: Request) -> SearchResponse:
     svc: SearchService = request.app.state.search
     results = await svc.search(req.query)
     return SearchResponse(query=req.query, count=len(results), results=results)
-
-
-@app.post(
-    "/send-voice",
-    response_model=SendVoiceResponse,
-    dependencies=[
-        Depends(_require_api_key),
-        Depends(_require_telegram_session),
-    ],
-)
-async def send_voice(req: SendVoiceRequest, request: Request) -> SendVoiceResponse:
-    svc: VoiceService = request.app.state.voice
-    return await svc.send(req.chat_id, req.template)
 
 
 @app.post(

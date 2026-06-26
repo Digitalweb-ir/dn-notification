@@ -9,8 +9,7 @@ Production-ready FastAPI service that connects to a **personal Telegram account*
 n8n (or any HTTP client) to use:
 
 * `POST /search` — search private (1-to-1) dialogs for a keyword
-* `POST /send-voice` — send a predefined voice note to a user
-* `POST /send-message` — send a Telegram Business Quick Reply to a user
+* `POST /send-message` — send a message to a user (Quick Reply or direct text)
 
 Group chats and channels are ignored end-to-end. `FloodWaitError` is awaited
 automatically. The session is persistent — no re-login on every request.
@@ -90,8 +89,7 @@ app/
 ├── models.py             # Pydantic request/response schemas
 ├── telegram_client.py    # Telethon wrapper (FloodWait-safe)
 ├── search_service.py     # Global Telegram search (exact match, private dialogs only)
-├── voice_service.py      # Voice file mapping + send_file
-└── message_service.py    # Quick Reply sender (Telegram Business)
+└── message_service.py    # Message sender (Quick Reply + direct text)
 
 dnnotification.sh         # Deployment CLI (installed to /usr/local/bin/dnnotification)
 package.json              # Minimal Node manifest; pins semantic-release for CI
@@ -105,12 +103,10 @@ Dockerfile                # Production image; takes VERSION as a build-arg, stam
 ### Simplified configuration
 
 `/opt/dn-notification/.env` keeps only the values you actually configure. The
-**only** path the user sets is `DATA_DIR`; voices, session, and logs
+**only** path the user sets is `DATA_DIR`; session and logs
 sub-directories are derived from it programmatically by `app/config.py`:
 
 ```python
-@property
-def voices_dir(self)  -> str: return f"{self.data_dir}/voices"
 @property
 def session_dir(self) -> str: return f"{self.data_dir}/session"
 @property
@@ -255,20 +251,7 @@ details.
 **Keep this file safe — anyone with it can access your Telegram
 account.**
 
-### 5. Add voice files
-
-Drop `.ogg` voice notes into `app/voices/`:
-
-```
-app/voices/expired.ogg
-app/voices/welcome.ogg
-app/voices/support.ogg
-```
-
-The notes must be valid OGG Opus (Telegram voice-note format). The Telegram
-Desktop "Save as voice message" export is one easy way to produce these.
-
-### 6. Run the API
+### 5. Run the API
 
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -294,12 +277,11 @@ docker run -d \
   --name telegram-automation \
   --env-file .env \
   -p 8000:8000 \
-  -v $(pwd)/app/voices:/app/voices \
   -v $(pwd)/telegram_session.session:/app/telegram_session.session \
   telegram-automation
 ```
 
-The voice and session files are mounted as volumes so they survive container
+The session file is mounted as a volume so it survives container
 restarts.
 
 ---
@@ -349,37 +331,6 @@ curl -X POST http://localhost:8000/search \
 * Uses Telegram's **server-side global search** (single API call) for fast results.
 * Only **exact** text matches are returned (the message content equals the query).
 * Top matches (default 3, configurable via `SEARCH_TOP_MATCHES`).
-
-### `POST /send-voice`
-
-```bash
-curl -X POST http://localhost:8000/send-voice \
-  -H "Content-Type: application/json" \
-  -H "X-API-KEY: your_secret_key" \
-  -d '{"chat_id": 123456789, "template": "welcome"}'
-```
-
-```json
-{
-  "chat_id": 123456789,
-  "template": "welcome",
-  "file": "welcome.ogg",
-  "message_id": 42,
-  "sent_at": "2026-06-11T09:00:00+00:00"
-}
-```
-
-Templates map to files in `app/voices/`:
-
-| template | file               |
-| -------- | ------------------ |
-| expired  | expired.ogg        |
-| welcome  | welcome.ogg        |
-| support  | support.ogg        |
-| custom   | (uses welcome.ogg) |
-
-> The service refuses to send to bots or non-user entities as a safety
-> check. Telegram `FloodWaitError`s are awaited and retried automatically.
 
 ### `POST /send-message`
 
@@ -467,7 +418,7 @@ The only path you set is `DATA_DIR`; everything else is derived from it.
 | `DEBUG`              | `false`                    | `true` → DEBUG log level, `false` → INFO                                       |
 | `SEARCH_TOP_MATCHES` | `3`                        | Max matches returned per search                                                 |
 | `SEARCH_CACHE_TTL`   | `300`                      | Seconds before dialog list cache is refreshed                                   |
-| `DATA_DIR`           | `/var/lib/dn-notification` | Persistent data root (in-container) — voices/session/logs are derived from this |
+| `DATA_DIR`           | `/var/lib/dn-notification` | Persistent data root (in-container) — session/logs are derived from this |
 
 The deployment image and the GitHub repo are **not** configurable:
 
@@ -483,11 +434,11 @@ In n8n, use the **HTTP Request** node:
 1. **Authentication**: Generic Credential Type → Header Auth with
    `X-API-KEY: your_secret_key`
 2. **Method**: POST
-3. **URL**: `http://your-server:8000/search` (or `/send-voice`)
+3. **URL**: `http://your-server:8000/search` (or `/send-message`)
 4. **Body**: JSON
 
 You can chain: search → loop over `results` → for each match, call
-`/send-voice` with the `chat_id` and a chosen `template`.
+`/send-message` with the `chat_id` and a `message` or `shortcut`.
 
 ---
 
@@ -498,6 +449,6 @@ You can chain: search → loop over `results` → for each match, call
 * The session grants full access to your Telegram account. Run this service
   on a host you trust.
 * Always set a strong `API_KEY` — the API has no per-user model; anyone with
-  the key can send voice notes from your account.
+  the key can send messages from your account.
 * Consider running the service behind a reverse proxy (nginx, Caddy) and
   putting it on a private network.

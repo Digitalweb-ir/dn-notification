@@ -37,15 +37,11 @@ class Settings(BaseSettings):
     search_cache_ttl: int = 300
 
     # Persistent storage — DATA_DIR is the only path the user configures.
-    # The voices, session, and logs sub-directories are derived from it
+    # The session and logs sub-directories are derived from it
     # so there's exactly one source of truth. The host bind-mount in
     # docker-compose.yaml maps DATA_DIR on the host onto the same path
     # inside the container.
     data_dir: str = "/var/lib/dn-notification"
-
-    @property
-    def voices_dir(self) -> str:
-        return f"{self.data_dir}/voices"
 
     @property
     def session_dir(self) -> str:
@@ -58,14 +54,6 @@ class Settings(BaseSettings):
     @property
     def session_path(self) -> Path:
         return Path(self.session_dir) / f"{self.tg_session_name}.session"
-
-    @property
-    def voices_path(self) -> Path:
-        # The directory is created and owned by docker-entrypoint.sh.
-        # The app only needs the path; if it is missing, something is
-        # wrong with the entrypoint (or the image was started without
-        # it), and the right fix is at deploy time, not at request time.
-        return Path(self.voices_dir)
 
 
 @lru_cache

@@ -71,7 +71,7 @@ COPY app ./app
 # Persistent data lives under /var/lib/dn-notification (configurable
 # via DATA_DIR at runtime). The host bind-mounts the same path from
 # the host into the container (see docker-compose.yaml), so the
-# per-purpose subdirs (session, logs, voices) are NOT created here:
+# per-purpose subdirs (session, logs) are NOT created here:
 #   * On a fresh install, /var/lib/dn-notification may not exist on
 #     the host yet, and a bind-mount over a non-existent host path
 #     makes Docker create it as root with restrictive perms.
