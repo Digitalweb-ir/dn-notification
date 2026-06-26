@@ -34,7 +34,6 @@ class Settings(BaseSettings):
 
     # Search
     search_top_matches: int = 3
-    search_cache_ttl: int = 300
 
     # Persistent storage — DATA_DIR is the only path the user configures.
     # The session and logs sub-directories are derived from it

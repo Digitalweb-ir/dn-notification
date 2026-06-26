@@ -417,7 +417,6 @@ The only path you set is `DATA_DIR`; everything else is derived from it.
 | `HOST_PORT`          | `8000`                     | Host port mapping in docker-compose                                             |
 | `DEBUG`              | `false`                    | `true` → DEBUG log level, `false` → INFO                                       |
 | `SEARCH_TOP_MATCHES` | `3`                        | Max matches returned per search                                                 |
-| `SEARCH_CACHE_TTL`   | `300`                      | Seconds before dialog list cache is refreshed                                   |
 | `DATA_DIR`           | `/var/lib/dn-notification` | Persistent data root (in-container) — session/logs are derived from this |
 
 The deployment image and the GitHub repo are **not** configurable:
